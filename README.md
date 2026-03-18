@@ -623,7 +623,15 @@ HOW WE GAINED ROOT (for reference):
 - Modified etc/system_crontab.cron to inject SSH pubkey
 - POST /v2/system_restore with modified ZIP → cron ran → SSH access
 
-CURRENT STATUS: All working as of 2026-03-18 (v1.6.0).
+ROUTING FIX (2026-03-18): networkd-dispatcher was unreliable for USB ethernet → added xproxy-routing.service
+- If SOCKS5 times out after reboot: SSH in, run /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing manually
+
+SECOND BOX: XProxy XB22 v2 (MAC 02:03:1d:4a:a1:61) — runs XProxy V20.4 (expired license)
+- backup/restore exploit DOES NOT work on V20.4 (locked behind license)
+- SSH access requires HDMI + USB keyboard → GRUB recovery → passwd root
+- On hold until USB keyboard arrives
+
+CURRENT STATUS: All working as of 2026-03-18 (v1.7.0).
 - SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
 - SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
 - Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
@@ -636,7 +644,86 @@ I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 
 ---
 
+## Second XProxy XB22 Box — Attempt Log
+
+A second XProxy XB22 (MAC: `02:03:1d:4a:a1:61`, IP: `192.168.1.191` via DHCP) was tested.
+It runs **XProxy V20.4** (build 2023.Oct04.1938, expired free license).
+
+### What Works on Second Box
+- Panel accessible at `http://192.168.1.191` (no auth required)
+- SSH port 22 open
+- Device boots, responds to ping
+
+### What Was Blocked / Locked
+- `GET /v2/system_backup` → **404** (locked behind expired license — exploit used on first box does NOT work on V20.4)
+- All config POST endpoints (system_time_zone, update_proxies_settings, etc.) → `{"status":false}` (license check)
+- `sshpass` with ~40 common passwords → all failed
+- Path traversal via `/v2/vpn_service_upload` → **blocked** (werkzeug `secure_filename` sanitizes filename)
+
+### How to Gain Access to Second Box
+
+**Option A — HDMI + USB keyboard** (recommended):
+1. Connect HDMI to TV, USB keyboard to box
+2. Reboot box (unplug/replug power)
+3. If GRUB menu appears: Advanced options → recovery mode → root shell → `passwd root` → new password → `reboot`
+4. Then SSH: `sshpass -p <newpass> ssh root@192.168.1.191`
+5. Deploy xproxymgr as usual
+
+**Option B — already tried, doesn't work on V20.4:**
+- `/v2/system_backup` backup/restore exploit (requires license)
+
+> Second box is **on hold** until USB keyboard is available.
+> Note: box gets random DHCP IP on each reboot (no DHCP binding configured for its MAC).
+> Add DHCP binding in router: MAC `02:03:1d:4a:a1:61` → fixed IP (e.g. `192.168.1.108`) before deploying.
+
+---
+
+## Policy Routing — Known Issue & Fix
+
+**Symptom:** After reboot or replug, SOCKS5 accepts TCP connections but all traffic times out.
+
+**Root cause:** `networkd-dispatcher` doesn't always fire for USB ethernet interfaces on boot,
+leaving routing tables 101 and 102 empty.
+
+**Fix (applied 2026-03-18):** Added `xproxy-routing.service` systemd unit as a reliable fallback:
+
+```bash
+cat > /etc/systemd/system/xproxy-routing.service << 'EOF'
+[Unit]
+Description=XProxy dongle policy routing setup
+After=network.target network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl daemon-reload && systemctl enable --now xproxy-routing.service
+```
+
+Manual recovery if routing is lost:
+```bash
+ssh root@192.168.1.107
+ip rule add from 192.168.101.100 table 101 2>/dev/null || true
+ip rule add from 192.168.102.100 table 102 2>/dev/null || true
+ip route replace default via 192.168.101.1 dev eth2 table 101   # adjust ethX
+ip route replace default via 192.168.102.1 dev eth1 table 102   # adjust ethX
+```
+
+---
+
 ## Version History
+
+### v1.7.0 — Routing persistence fix + second box investigation
+
+- **Fixed** policy routing not surviving reboot: added `xproxy-routing.service` systemd unit that runs the routing script reliably at boot (networkd-dispatcher alone was unreliable for USB ethernet interfaces)
+- **Investigated** second XProxy XB22 (V20.4) — documented what works and what doesn't
+- **Updated** troubleshooting guide with routing recovery procedure
 
 ### v1.6.0 — Dashboard redesign: per-dongle cards
 
