@@ -642,6 +642,66 @@ I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 
 ---
 
+## Moving the Setup to a Different Network
+
+If you take the XB22 to a new location (different router, different ISP), here's what needs to change:
+
+### 1. DHCP Binding — New Router
+
+In the new router's admin panel, bind the XB22's MAC to a fixed LAN IP:
+
+| Device | MAC | Fixed IP |
+|--------|-----|----------|
+| XProxy XB22 | `02:03:76:f0:1b:bb` | `192.168.1.107` (or any IP you choose) |
+
+> If the new router uses a different subnet (e.g. `10.0.0.x`), pick an IP on that subnet and update all port forwarding rules accordingly.
+
+### 2. Port Forwarding — New Router
+
+Forward these ports to the XB22's LAN IP:
+
+| External Port | Internal IP | Internal Port | Protocol | Purpose |
+|--------------|-------------|---------------|----------|---------|
+| **1080** | 192.168.1.107 | 1080 | TCP | SOCKS5 dongle 0 (True) |
+| **1081** | 192.168.1.107 | 1081 | TCP | SOCKS5 dongle 1 (DTAC) |
+| **8080** | 192.168.1.107 | 8080 | TCP | Dashboard + API |
+
+### 3. DuckDNS — Update Public IP
+
+DuckDNS auto-updates if the XB22 runs the updater, but if not:
+
+1. Check new public IP: go to `http://whatismyip.com` from any device on the new network
+2. Update DuckDNS manually: log in at `https://www.duckdns.org`, update `havanawin` to the new IP
+3. Or set up a cron job on XB22 to auto-update:
+   ```bash
+   # On XB22 — replace TOKEN with your DuckDNS token
+   echo "*/5 * * * * curl -s 'https://www.duckdns.org/update?domains=havanawin&token=TOKEN&ip=' > /dev/null" | crontab -
+   ```
+
+### 4. Nothing Changes on XB22 Itself
+
+- Policy routing uses IP-based detection (192.168.101.x / 192.168.102.x dongle subnets) — works on any LAN
+- danted binds to dongle subnet IPs — not affected by LAN subnet change
+- xproxymgr service listens on `0.0.0.0:8080` — works on any network
+- SSH key stays in `/root/.ssh/authorized_keys`
+
+### 5. Checklist
+
+```
+□ DHCP binding in new router: MAC 02:03:76:f0:1b:bb → fixed IP
+□ Port forwarding: 1080, 1081, 8080 → XB22 LAN IP
+□ DuckDNS updated to new public IP (or auto-updater running on XB22)
+□ Test: curl http://havanawin.duckdns.org:8080/api/status
+□ Test: curl --socks5 havanawin.duckdns.org:1080 http://ifconfig.me
+□ Test: curl --socks5 havanawin.duckdns.org:1081 http://ifconfig.me
+```
+
+> If the new router's LAN subnet is different (not 192.168.1.x), the XB22's own LAN IP will change.
+> SSH into it via the new IP, then verify DHCP binding is applied.
+> Everything on XB22 itself still works — only the external address and router rules change.
+
+---
+
 ## Second XProxy XB22 Box — Attempt Log
 
 A second XProxy XB22 (MAC: `02:03:1d:4a:a1:61`, IP: `192.168.1.191` via DHCP) was tested.
