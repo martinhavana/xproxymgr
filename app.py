@@ -12,7 +12,7 @@ import threading
 import time
 from collections import deque
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import requests
 
