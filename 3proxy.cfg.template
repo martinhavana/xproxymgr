@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# 3proxy.cfg – XProxy Manager configuration template
+#
+# Variables (replaced by proxy_manager.py / generate_config()):
+#   {{PID_FILE}}      – path to PID file
+#   {{PROXY_LOG}}     – path to proxy log file
+#   {{USERNAME}}      – SOCKS5 username
+#   {{PASSWORD}}      – SOCKS5 password (clear-text, stored locally only)
+#   {{PORT}}          – SOCKS5 listen port
+#   {{BIND_IP}}       – interface IP to bind (0.0.0.0 = all interfaces)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Run as a background daemon and write PID
+daemon
+pidfile {{PID_FILE}}
+
+# ── Logging ──────────────────────────────────────────────────────────────────
+# D = daily rotation; see 3proxy docs for format tokens.
+log {{PROXY_LOG}} D
+logformat "- +_L%t.%.  %N.%p %E %U %C:%c %R:%r %O %I %h %T"
+
+# Limit log file size (bytes) – prevents disk exhaustion on embedded storage
+# Uncomment if your 3proxy version supports it:
+# maxlogfilesize 10000000
+
+# ── Authentication ────────────────────────────────────────────────────────────
+# CL = clear-text password comparison (sufficient for LAN-only exposure)
+# Use 'CR5' for MD5-hashed passwords when storing credentials is a concern.
+users {{USERNAME}}:CL:{{PASSWORD}}
+
+# ── Access control ────────────────────────────────────────────────────────────
+# Require authentication on all connections; allow all authenticated users.
+auth strong
+allow *
+
+# ── SOCKS5 listener ───────────────────────────────────────────────────────────
+# -p  : listen port
+# -i  : local interface to bind (incoming connections)
+# -e  : external interface to use for outbound connections
+#       Set -e to the dongle's LAN IP (e.g. 192.168.102.x) to force traffic
+#       through the 4G interface when multiple interfaces are present.
+socks -p{{PORT}} -i{{BIND_IP}} -e{{BIND_IP}}
