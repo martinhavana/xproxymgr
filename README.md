@@ -28,7 +28,7 @@
 4. **REST API** at port 8080 — `/api/status`, `/api/rotate`, `/api/dongles`, etc.
 5. **Background monitor** — polls dongle + proxy status every 15s
 6. **Multi-dongle support** — each XH22 managed independently
-7. **Tailscale VPN** — persistent access from any network via `100.97.64.109`
+7. **External access** — AIS Fibre port forwarding + DuckDNS (`havanawin.duckdns.org`)
 
 ---
 
@@ -142,25 +142,84 @@ regardless of the actual endpoint URL.
 | SOCKS5 | `192.168.1.107:1080` |
 | Dashboard | `http://192.168.1.107:8080` |
 
-### Any network — Tailscale (persistent) 🌍
+### Any network — DuckDNS + Port Forwarding 🌍
 
-Tailscale IP: **`100.97.64.109`** (tailnet: `martinhavana.github`)
+Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 
 | Service | Address |
 |---------|---------|
-| SSH | `ssh -i ~/.ssh/id_ed25519 root@100.97.64.109` |
-| SOCKS5 | `100.97.64.109:1080` |
-| Dashboard | `http://100.97.64.109:8080` |
+| SOCKS5 | `havanawin.duckdns.org:1080` |
+| Dashboard | `http://havanawin.duckdns.org:8080` |
+| IP Rotate (AdsPower) | `http://havanawin.duckdns.org:8080/api/rotate/0` |
 
-> **Requires Tailscale installed on your client machine**, logged in as `martinhavana.github`.
-> Install: https://tailscale.com/download
+**Router port forwarding (AIS Fibre F6107A):**
+
+| External Port | Internal IP | Internal Port | Purpose |
+|---------------|-------------|---------------|---------|
+| 1080 | 192.168.1.107 | 1080 | SOCKS5 proxy |
+| 8080 | 192.168.1.107 | 8080 | Dashboard + API |
+
+> ⚠️ **Hairpin NAT not supported on AIS Fibre F6107A.**
+> You CANNOT test via public IP (`havanawin.duckdns.org`) from inside the same LAN.
+> Always test from a hotspot / external network.
+
+---
+
+## Policy Routing (Critical for SOCKS5 to Work)
+
+Without policy routing, danted receives SOCKS5 connections on port 1080 but **outgoing traffic via eth1 (dongle) times out** because the default route uses eth0 (lower metric), causing asymmetric routing — replies can't return via the dongle interface.
+
+### Fix Applied
 
 ```bash
-# Install Tailscale on XB22 (already done)
-curl -fsSL https://tailscale.com/install.sh | sh
-tailscale up   # generates auth URL → open in browser → Connect
-tailscale ip -4  # → 100.97.64.109
+# Route traffic from 192.168.101.100 (eth1 IP) out via eth1 gateway
+ip rule add from 192.168.101.100 table 101
+ip route add default via 192.168.101.1 dev eth1 table 101
 ```
+
+### Make Persistent (networkd-dispatcher)
+
+```bash
+cat > /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing << 'EOF'
+#!/bin/sh
+if [ "$IFACE" = "eth1" ]; then
+    ip rule add from 192.168.101.100 table 101 2>/dev/null || true
+    ip route add default via 192.168.101.1 dev eth1 table 101 2>/dev/null || true
+fi
+EOF
+chmod +x /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
+```
+
+---
+
+## danted Configuration
+
+Working `/etc/danted.conf` (two common gotchas fixed):
+
+```
+logoutput: syslog
+internal: 0.0.0.0 port = 1080
+external: eth1
+clientmethod: none
+socksmethod: none
+user.privileged: root
+user.notprivileged: nobody
+
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect disconnect error
+}
+
+socks pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    socksmethod: none
+    log: connect disconnect error
+}
+```
+
+**Gotchas:**
+- `logoutput: syslog` — NOT `/var/log/danted.log` (read-only filesystem at startup causes daemon crash)
+- `socksmethod: none` — NOT `socksmethod: username none` (the `username` keyword breaks auth-free setup)
 
 ---
 
@@ -194,16 +253,38 @@ pip3 install flask requests
 
 # dante SOCKS5 config
 cat > /etc/danted.conf << 'EOF'
-logoutput: /var/log/danted.log
+logoutput: syslog
 internal: 0.0.0.0 port = 1080
 external: eth1
 clientmethod: none
 socksmethod: none
 user.privileged: root
 user.notprivileged: nobody
-client pass { from: 0.0.0.0/0 to: 0.0.0.0/0 }
-socks pass  { from: 0.0.0.0/0 to: 0.0.0.0/0; socksmethod: none }
+
+client pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    log: connect disconnect error
+}
+
+socks pass {
+    from: 0.0.0.0/0 to: 0.0.0.0/0
+    socksmethod: none
+    log: connect disconnect error
+}
 EOF
+
+# Policy routing (required for SOCKS5 to work through dongle)
+ip rule add from 192.168.101.100 table 101 2>/dev/null || true
+ip route add default via 192.168.101.1 dev eth1 table 101 2>/dev/null || true
+
+cat > /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing << 'RTEOF'
+#!/bin/sh
+if [ "$IFACE" = "eth1" ]; then
+    ip rule add from 192.168.101.100 table 101 2>/dev/null || true
+    ip route add default via 192.168.101.1 dev eth1 table 101 2>/dev/null || true
+fi
+RTEOF
+chmod +x /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
 
 # systemd service
 cat > /etc/systemd/system/xproxymgr.service << 'EOF'
@@ -229,7 +310,7 @@ systemctl enable --now danted xproxymgr
 
 ## REST API Reference
 
-Base URL: `http://192.168.1.107:8080`
+Base URL: `http://192.168.1.107:8080` or `http://havanawin.duckdns.org:8080`
 
 ### `GET /api/status`
 ```json
@@ -246,16 +327,25 @@ Base URL: `http://192.168.1.107:8080`
 }
 ```
 
-### `POST /api/rotate`
-Rotate IP for dongle 1 (default). Optional: `{"dongle": 0}` for index.
+### `GET /api/rotate` or `POST /api/rotate`
+Rotate IP for dongle 0 (default). Both GET and POST supported.
 ```bash
+# GET — for browser, AdsPower, or any simple HTTP client:
+curl http://192.168.1.107:8080/api/rotate
+curl "http://192.168.1.107:8080/api/rotate?dongle=1"   # specific dongle
+
+# POST — for API clients:
 curl -X POST http://192.168.1.107:8080/api/rotate
-# {"success": true, "new_ip": "49.237.6.170"}
+curl -X POST http://192.168.1.107:8080/api/rotate -d '{"dongle":1}'
+
+# {"success": true, "new_ip": "49.237.6.170", "old_ip": "49.237.39.218"}
 ```
 
-### `POST /api/rotate/1` (dongle by index)
+### `GET /api/rotate/<index>` or `POST /api/rotate/<index>` (dongle by index)
 ```bash
-curl -X POST http://192.168.1.107:8080/api/rotate/1   # second dongle
+# AdsPower rotation URL format (GET):
+http://havanawin.duckdns.org:8080/api/rotate/0   # dongle 0
+http://havanawin.duckdns.org:8080/api/rotate/1   # dongle 1
 ```
 
 ### `GET /api/dongles`
@@ -295,6 +385,19 @@ Returns last 200 log lines as JSON array.
 
 ---
 
+## AdsPower Integration
+
+In AdsPower proxy settings, enter:
+- **Proxy type:** SOCKS5
+- **Host:** `havanawin.duckdns.org`
+- **Port:** `1080`
+- **Rotation URL:** `http://havanawin.duckdns.org:8080/api/rotate/0`
+
+AdsPower sends a GET request to the rotation URL before each browser session opens.
+The GET endpoint returns `{"success": true, "new_ip": "...", "old_ip": "..."}`.
+
+---
+
 ## File Structure
 
 ```
@@ -314,7 +417,7 @@ xproxymgr/
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `DONGLE_HOST` | `192.168.101.1` | XH22 panel IP (dongle 1) |
-| `DONGLE_HOSTS` | *(auto-detect)* | Comma-separated for multi-dongle |
+| `DONGLE_HOSTS` | `192.168.101.1,192.168.102.1,...` | Comma-separated for multi-dongle |
 | `PROXY_PORT` | `1080` | SOCKS5 port |
 | `WEB_PORT` | `8080` | Dashboard port |
 | `PROXY_USER` | `proxy` | SOCKS5 username (if auth enabled) |
@@ -350,6 +453,10 @@ The `/api/rotate/<index>` endpoint rotates by dongle index (0-based).
 | Dongle not detected | Interface not up | `ip addr show` — check ethX exists |
 | SSH: `Permission denied` | Key not in authorized_keys | Re-run key injection via backup/restore |
 | fail2ban blocking SSH | Too many failed attempts | Wait 10min or `fail2ban-client unban <ip>` |
+| SOCKS5 connection times out externally | Policy routing missing | `ip rule add from 192.168.101.100 table 101` + `ip route add default via 192.168.101.1 dev eth1 table 101` |
+| danted fails to start | Log file read-only at boot | Use `logoutput: syslog` in danted.conf, not a file path |
+| Can't reach proxy via DuckDNS from home LAN | Hairpin NAT not supported on AIS F6107A | Test from hotspot / external network only |
+| xproxymgr crash: `AttributeError: module 'config' has no attribute 'DONGLE_HOSTS'` | Old config.py on device | Deploy ALL Python files together: `scp app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/` |
 
 ---
 
@@ -372,12 +479,27 @@ Code: ~/Desktop/xproxy/ | Deployed: root@192.168.1.107:/opt/xproxymgr/
 HARDWARE:
 - XB22: ARM64 Ubuntu 20.04, IP 192.168.1.107, SSH → ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
 - XH22 dongle #1: eth1 (192.168.101.100/24), panel at http://192.168.101.1
-- XH22 dongle #2: eth2 (192.168.102.100/24), panel at http://192.168.102.1 (being added)
+- XH22 dongle #2: eth2 (192.168.102.100/24), panel at http://192.168.102.1
 
 SERVICES RUNNING:
 - xproxymgr (Flask): port 8080 — web dashboard + REST API
-- danted (SOCKS5): port 1080
-- Deploy: scp -i ~/.ssh/id_ed25519 <file>.py root@192.168.1.107:/opt/xproxymgr/ && ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "systemctl restart xproxymgr"
+- danted (SOCKS5): port 1080 — no auth, open to world
+- Deploy command: scp -i ~/.ssh/id_ed25519 app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/ && ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "systemctl restart xproxymgr"
+- ALWAYS deploy ALL .py files together (config.py must stay in sync with app.py)
+
+EXTERNAL ACCESS:
+- DuckDNS domain: havanawin.duckdns.org → 58.136.146.0 (AIS Fibre public IP)
+- Router: AIS Fibre F6107A — port forward 1080→192.168.1.107:1080, 8080→192.168.1.107:8080
+- SOCKS5 (anywhere): havanawin.duckdns.org:1080
+- Dashboard (anywhere): http://havanawin.duckdns.org:8080
+- Rotate URL (AdsPower GET): http://havanawin.duckdns.org:8080/api/rotate/0
+- ⚠️ Hairpin NAT NOT supported on AIS F6107A — test from hotspot, not home WiFi
+
+POLICY ROUTING (critical — without this SOCKS5 times out):
+- Traffic from eth1 (192.168.101.100) must exit via eth1, not eth0
+- Applied: ip rule add from 192.168.101.100 table 101
+-          ip route add default via 192.168.101.1 dev eth1 table 101
+- Persistent: /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
 
 CRITICAL TECHNICAL FACTS — XH22 DONGLE API:
 1. NOT Huawei HiLink — custom Qualcomm firmware (Mongoose 3.0)
@@ -390,29 +512,28 @@ CRITICAL TECHNICAL FACTS — XH22 DONGLE API:
    - ONLY file=router reliably changes IP (forces carrier to release lease)
 6. Dongle credentials: admin/admin
 
+DANTED CONFIG (/etc/danted.conf):
+- logoutput: syslog  (NOT a file path — read-only filesystem at boot causes crash)
+- socksmethod: none  (NOT "username none" — that breaks auth-free setup)
+- external: eth1
+
 CODE STRUCTURE:
 - hilink.py: XH22Client class — _login(), _auth(), _api_get(), rotate_ip() uses file=router
 - proxy_manager.py: danted via systemctl (NOT 3proxy — not in Ubuntu 20.04 apt)
-- app.py: Flask /api/status /api/rotate /api/rotate/<idx> /api/dongles /api/proxy/start /api/proxy/stop /api/logs
-- config.py: env-var overrides for all settings
+- app.py: Flask — /api/status /api/rotate /api/rotate/<idx> /api/dongles /api/proxy/start /api/proxy/stop /api/logs
+  - /api/rotate and /api/rotate/<idx> support BOTH GET and POST (GET for AdsPower/browser)
+- config.py: DONGLE_HOSTS="192.168.101.1,192.168.102.1,..." — env-var overrides for all settings
 
 HOW WE GAINED ROOT (for reference):
 - Unauthenticated GET /v2/system_backup → 62MB ZIP download
 - Modified etc/system_crontab.cron to inject SSH pubkey
 - POST /v2/system_restore with modified ZIP → cron ran → SSH access
 
-TAILSCALE: Installed, tailnet martinhavana.github, persistent IP 100.97.64.109
-- SSH (local):      ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
-- SSH (anywhere):   ssh -i ~/.ssh/id_ed25519 root@100.97.64.109
-- SOCKS5 (local):   192.168.1.107:1080
-- SOCKS5 (anywhere): 100.97.64.109:1080
-- Dashboard (local): http://192.168.1.107:8080
-- Dashboard (anywhere): http://100.97.64.109:8080
-
-CURRENT STATUS: All working.
-- Dashboard: http://192.168.1.107:8080
-- SOCKS5: 192.168.1.107:1080 (open, no auth)
-- Rotation test: curl -X POST http://192.168.1.107:8080/api/rotate
+CURRENT STATUS: All working as of 2026-03-18.
+- SOCKS5: havanawin.duckdns.org:1080 (confirmed working from hotspot)
+- Dashboard: http://havanawin.duckdns.org:8080
+- Rotation test: curl http://havanawin.duckdns.org:8080/api/rotate/0
+- GitHub: https://github.com/martinhavana/xproxymgr
 
 I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 ```
@@ -421,7 +542,19 @@ I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 
 ## Version History
 
-### v1.3.0 — Tailscale external access
+### v1.4.0 — External access + GET rotate endpoints + routing fix
+
+- **Removed Tailscale** — requires Tailscale on every client device, not suitable for public proxy use
+- **DuckDNS + port forwarding** — `havanawin.duckdns.org:1080` (SOCKS5) and `:8080` (dashboard) accessible from any network
+  - AIS Fibre F6107A router: port forwarding 1080 and 8080 → 192.168.1.107
+  - Fixed router had wrong internal IP (192.168.1.151 → 192.168.1.107) via Chrome CDP
+- **Policy routing fix** — SOCKS5 was timing out because outgoing traffic on eth1 was routed via eth0 (asymmetric routing). Fixed with `ip rule + ip route` per-source routing. Persisted via networkd-dispatcher.
+- **GET endpoints for AdsPower** — `/api/rotate` and `/api/rotate/<index>` now accept both GET and POST
+  - AdsPower rotation URL: `http://havanawin.duckdns.org:8080/api/rotate/0`
+- **danted config fixes** — changed `logoutput` to `syslog` (was file causing boot crash), fixed `socksmethod: none` (was `username none`)
+- **Deploy fix** — must deploy ALL Python files together; old config.py missing `DONGLE_HOSTS` caused crash
+
+### v1.3.0 — Tailscale external access (removed in v1.4.0)
 - Installed Tailscale on XB22 (`tailscale up --reset`)
 - Device registered as `xproxy-xb22` on tailnet `martinhavana.github`
 - Persistent external IP: `100.97.64.109` (accessible from any network)

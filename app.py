@@ -635,18 +635,26 @@ def _do_rotate(dongle_index: int = 0):
         return {"success": False, "error": str(exc)}, 500
 
 
-@app.route("/api/rotate", methods=["POST"])
+@app.route("/api/rotate", methods=["GET", "POST"])
 def api_rotate():
-    """Trigger an IP rotation cycle on the primary (index 0) dongle."""
+    """Trigger an IP rotation cycle on the primary (index 0) dongle.
+    Supports both GET (for browser/AdsPower) and POST (for API clients).
+    GET /api/rotate          → rotate dongle 0
+    GET /api/rotate?dongle=1 → rotate dongle 1
+    """
     body = request.get_json(silent=True) or {}
-    idx = int(body.get("dongle", 0))
+    idx = int(request.args.get("dongle", body.get("dongle", 0)))
     result, status = _do_rotate(idx)
     return jsonify(result), status
 
 
-@app.route("/api/rotate/<int:dongle_index>", methods=["POST"])
+@app.route("/api/rotate/<int:dongle_index>", methods=["GET", "POST"])
 def api_rotate_by_index(dongle_index: int):
-    """Trigger an IP rotation cycle on a specific dongle by index (0-based)."""
+    """Trigger an IP rotation cycle on a specific dongle by index (0-based).
+    Supports both GET (for browser/AdsPower) and POST (for API clients).
+    GET /api/rotate/0  → rotate dongle 0
+    GET /api/rotate/1  → rotate dongle 1
+    """
     result, status = _do_rotate(dongle_index)
     return jsonify(result), status
 
