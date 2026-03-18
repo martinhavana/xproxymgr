@@ -483,6 +483,43 @@ xproxymgr/
 
 ---
 
+## Telegram Alerts
+
+xproxymgr monitors both SOCKS5 proxies and sends Telegram notifications when a dongle goes down or recovers.
+
+### How It Works
+
+- Every **30 seconds** the watchdog tests `:1080` (True) and `:1081` (DTAC) by routing a real HTTP request through each proxy to `api4.ipify.org`
+- If a proxy fails for **2 minutes** → alert sent: `🔴 Dongle-True (:1080) — proxy nie działa!`
+- When it recovers → recovery sent: `✅ Dongle-True (:1080) — proxy wróciło! IP: x.x.x.x, Czas awarii: X min`
+- Alert state is **persisted to disk** (`/var/lib/xproxymgr/alert_state.json`) — survives service restarts, recovery messages are always sent correctly
+
+### Requirements
+
+The `requests[socks]` package must be installed (PySocks dependency):
+
+```bash
+pip3 install "requests[socks]"
+```
+
+> ⚠️ Without this, all SOCKS5 checks fail with `Missing dependencies for SOCKS support` and proxies always appear down.
+
+### Manually Reset Alert State
+
+If the state file gets out of sync (e.g. after manual intervention):
+
+```bash
+# Force both as "alerted" → watchdog sends recovery on next successful check
+echo '{"alerted": ["Dongle-True (:1080)", "Dongle-DTAC (:1081)"], "down_since": {"Dongle-True (:1080)": null, "Dongle-DTAC (:1081)": null}}' \
+  > /var/lib/xproxymgr/alert_state.json && systemctl restart xproxymgr
+
+# Clear all state → fresh start (new alerts after grace period)
+echo '{"alerted": [], "down_since": {}}' \
+  > /var/lib/xproxymgr/alert_state.json && systemctl restart xproxymgr
+```
+
+---
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -495,6 +532,11 @@ xproxymgr/
 | `PROXY_PASS` | `changeme` | SOCKS5 password |
 | `ROTATE_WAIT_TIMEOUT` | `60` | Max seconds to wait for new IP |
 | `MONITOR_INTERVAL` | `15` | Background poll interval (seconds) |
+| `TG_TOKEN` | *(hardcoded in config.py)* | Telegram bot token |
+| `TG_CHAT_ID` | *(hardcoded in config.py)* | Telegram chat/user ID |
+| `PROXY_DOWN_GRACE` | `120` | Seconds before sending down alert |
+| `PROXY_CHECK_INTERVAL` | `30` | Seconds between SOCKS5 health checks |
+| `SOCKS5_PORTS` | `1080,1081` | Ports to monitor (matches DONGLE_HOSTS order) |
 
 ---
 
@@ -636,13 +678,21 @@ SECOND BOX: XProxy XB22 v2 (MAC 02:03:1d:4a:a1:61) — runs XProxy V20.4 (expire
 - Remaining options: USB→UART serial adapter (~30 zł) OR Allwinner FEL mode via USB-C cable
 - On hold
 
-CURRENT STATUS: All working as of 2026-03-19 (v1.8.0).
+TELEGRAM ALERTS (v1.9.0):
+- Watchdog checks SOCKS5 :1080 (True) + :1081 (DTAC) every 30s via api4.ipify.org
+- Down > 2 min → TG alert 🔴 | Recovery → TG alert ✅
+- State persisted to /var/lib/xproxymgr/alert_state.json (survives restarts)
+- Requires: pip3 install "requests[socks]" (PySocks — without it all checks fail silently)
+- Reset state if needed: echo '{"alerted":[],"down_since":{}}' > /var/lib/xproxymgr/alert_state.json
+
+CURRENT STATUS: All working as of 2026-03-18 (v1.9.0).
 - SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
 - SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
 - Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
 - Rotate dongle 0: curl http://havanawin.duckdns.org:8080/api/rotate/0
 - Rotate dongle 1: curl http://havanawin.duckdns.org:8080/api/rotate/1
 - DuckDNS: auto-updating every 5 min from XB22 cron
+- Telegram alerts: active, state in /var/lib/xproxymgr/alert_state.json
 - GitHub: https://github.com/martinhavana/xproxymgr
 
 I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
@@ -808,6 +858,16 @@ ip route replace default via 192.168.102.1 dev eth1 table 102   # adjust ethX
 ---
 
 ## Version History
+
+### v1.9.0 — Telegram proxy alerts + persistent alert state
+
+- **Added** Telegram watchdog — monitors SOCKS5 `:1080` (True) and `:1081` (DTAC) every 30s via real HTTP request through each proxy
+- **Alert:** after 2 min downtime → `🔴 Dongle-X — proxy nie działa!`
+- **Recovery:** when proxy comes back → `✅ Dongle-X — proxy wróciło! IP: x.x.x.x, Czas awarii: X min`
+- **Persistent state:** alert state saved to `/var/lib/xproxymgr/alert_state.json` — survives service restarts, recovery messages always correct
+- **Fixed Python 3.8 compatibility:** `str | None` → `Optional[str]` (Ubuntu 20.04 ships Python 3.8)
+- **Fixed PySocks dependency:** `pip3 install "requests[socks]"` required for SOCKS5 checks — without it all checks fail silently with `Missing dependencies for SOCKS support`
+- **Config:** new env vars `TG_TOKEN`, `TG_CHAT_ID`, `PROXY_DOWN_GRACE`, `PROXY_CHECK_INTERVAL`, `SOCKS5_PORTS`
 
 ### v1.8.0 — DuckDNS auto-update + second box deep investigation
 
