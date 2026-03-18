@@ -215,20 +215,31 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   header h1 { font-size: 18px; font-weight: 700; letter-spacing: .5px; }
   header h1 span { color: var(--accent); }
   #uptime { color: var(--muted); font-size: 12px; }
-  .grid {
+  #refresh-countdown { font-size: 11px; color: var(--muted); }
+
+  /* Dongle grid — fills width, each card equal size */
+  #dongle-grid {
     display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
-    gap: 16px; padding: 20px 24px;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 16px; padding: 20px 24px 8px;
   }
-  .card {
+  .dcard {
     background: var(--surface); border: 1px solid var(--border);
     border-radius: var(--radius); padding: 18px;
   }
-  .card-title {
-    color: var(--muted); font-size: 11px; text-transform: uppercase;
-    letter-spacing: 1px; margin-bottom: 12px;
+  .dcard-header {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 14px;
   }
-  .value { font-size: 22px; font-weight: 700; word-break: break-all; }
+  .dcard-title {
+    font-size: 13px; font-weight: 700; letter-spacing: .3px;
+  }
+  .dcard-title small { color: var(--muted); font-weight: 400; font-size: 11px; margin-left: 6px; }
+  .ip-value { font-size: 20px; font-weight: 700; word-break: break-all; margin-bottom: 10px; }
+  .dcard-meta {
+    display: flex; justify-content: space-between; align-items: center;
+    margin-bottom: 14px;
+  }
   .badge {
     display: inline-block; padding: 3px 10px; border-radius: 20px;
     font-size: 12px; font-weight: 600; text-transform: capitalize;
@@ -237,25 +248,11 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   .badge-red    { background: rgba(255,71,87,.15);  color: var(--red);   }
   .badge-yellow { background: rgba(255,211,42,.15); color: var(--yellow);}
   .badge-grey   { background: rgba(136,146,164,.15);color: var(--muted); }
-  .btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 8px 16px; border: none; border-radius: 6px;
-    font-size: 13px; font-weight: 600; cursor: pointer;
-    transition: opacity .15s, transform .1s;
-  }
-  .btn:hover { opacity: .85; }
-  .btn:active { transform: scale(.97); }
-  .btn:disabled { opacity: .4; cursor: not-allowed; }
-  .btn-primary { background: var(--accent);  color: #fff; }
-  .btn-success { background: var(--green);   color: #000; }
-  .btn-danger  { background: var(--red);     color: #fff; }
-  .btn-purple  { background: var(--accent2); color: #fff; }
-  .btn-row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 14px; }
   .signal-bar {
-    display: flex; align-items: flex-end; gap: 3px; height: 24px;
+    display: flex; align-items: flex-end; gap: 3px; height: 20px;
   }
   .signal-bar span {
-    width: 7px; background: var(--border); border-radius: 2px;
+    width: 6px; background: var(--border); border-radius: 2px;
     transition: background .3s;
   }
   .signal-bar span.active { background: var(--green); }
@@ -264,28 +261,55 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   .signal-bar span:nth-child(3) { height: 65%; }
   .signal-bar span:nth-child(4) { height: 82%; }
   .signal-bar span:nth-child(5) { height: 100%; }
-  .row-between { display: flex; justify-content: space-between; align-items: center; }
+  .dcard-proxy {
+    font-size: 11px; color: var(--muted); margin-bottom: 12px;
+    font-family: monospace;
+  }
+  .dcard-last {
+    font-size: 11px; color: var(--muted); margin-bottom: 14px; min-height: 16px;
+  }
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 8px 16px; border: none; border-radius: 6px;
+    font-size: 13px; font-weight: 600; cursor: pointer;
+    transition: opacity .15s, transform .1s; width: 100%;
+    justify-content: center;
+  }
+  .btn:hover { opacity: .85; }
+  .btn:active { transform: scale(.97); }
+  .btn:disabled { opacity: .4; cursor: not-allowed; }
+  .btn-primary { background: var(--accent); color: #fff; }
+  .spinner {
+    display: none; width: 13px; height: 13px;
+    border: 2px solid rgba(255,255,255,.3);
+    border-top-color: #fff; border-radius: 50%;
+    animation: spin .6s linear infinite;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+
+  /* Log viewer */
   #logs-wrap {
-    margin: 0 24px 24px; background: var(--surface);
+    margin: 16px 24px 24px; background: var(--surface);
     border: 1px solid var(--border); border-radius: var(--radius);
     overflow: hidden;
   }
   #logs-title {
-    padding: 12px 16px; background: var(--surface2);
-    border-bottom: 1px solid var(--border); font-size: 12px;
+    padding: 10px 16px; background: var(--surface2);
+    border-bottom: 1px solid var(--border); font-size: 11px;
     color: var(--muted); text-transform: uppercase; letter-spacing: 1px;
     display: flex; justify-content: space-between; align-items: center;
   }
   #logs {
-    max-height: 260px; overflow-y: auto; font-family: monospace;
-    font-size: 12px; padding: 10px 16px; line-height: 1.7;
+    max-height: 220px; overflow-y: auto; font-family: monospace;
+    font-size: 11px; padding: 8px 16px; line-height: 1.7;
   }
-  #logs .entry { display: flex; gap: 12px; }
+  #logs .entry { display: flex; gap: 10px; }
   #logs .ts   { color: var(--muted); white-space: nowrap; }
   #logs .lvl-INFO    { color: var(--accent); }
   #logs .lvl-WARNING { color: var(--yellow); }
   #logs .lvl-ERROR   { color: var(--red);    }
   #logs .lvl-DEBUG   { color: var(--muted);  }
+
   #toast {
     position: fixed; bottom: 24px; right: 24px; padding: 12px 20px;
     background: var(--surface2); border: 1px solid var(--border);
@@ -293,21 +317,10 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
     transition: opacity .3s; pointer-events: none; z-index: 100;
   }
   #toast.show { opacity: 1; }
-  #spinner {
-    display: none; width: 14px; height: 14px;
-    border: 2px solid rgba(255,255,255,.3);
-    border-top-color: #fff; border-radius: 50%;
-    animation: spin .6s linear infinite;
+
+  #no-dongles {
+    padding: 40px 24px; text-align: center; color: var(--muted); display: none;
   }
-  @keyframes spin { to { transform: rotate(360deg); } }
-  .dongle-list { display: flex; flex-direction: column; gap: 8px; }
-  .dongle-item {
-    background: var(--surface2); border: 1px solid var(--border);
-    border-radius: 6px; padding: 10px 12px;
-  }
-  .dongle-item .dname { font-weight: 600; margin-bottom: 4px; }
-  .dongle-item .dmeta { color: var(--muted); font-size: 12px; }
-  #refresh-countdown { font-size: 11px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -320,75 +333,16 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 </header>
 
-<div class="grid">
-
-  <!-- Current IP -->
-  <div class="card">
-    <div class="card-title">Current WAN IP</div>
-    <div class="value" id="current-ip">–</div>
-    <div class="btn-row">
-      <button class="btn btn-primary" id="btn-rotate" onclick="rotateIp()">
-        <div id="spinner"></div>
-        &#8635; Rotate IP
-      </button>
-    </div>
-  </div>
-
-  <!-- Proxy Status -->
-  <div class="card">
-    <div class="card-title">SOCKS5 Proxy</div>
-    <div class="row-between">
-      <span class="badge" id="proxy-badge">–</span>
-      <span id="proxy-port" style="color:var(--muted);font-size:13px;"></span>
-    </div>
-    <div class="btn-row">
-      <button class="btn btn-success" onclick="proxyAction('start')">&#9654; Start</button>
-      <button class="btn btn-danger"  onclick="proxyAction('stop')">&#9632; Stop</button>
-    </div>
-  </div>
-
-  <!-- Connection -->
-  <div class="card">
-    <div class="card-title">Connection</div>
-    <div class="row-between">
-      <div>
-        <span class="badge" id="conn-badge">–</span>
-        <span id="net-type" style="margin-left:8px;font-size:13px;color:var(--muted);"></span>
-      </div>
-      <div class="signal-bar" id="signal-bar">
-        <span></span><span></span><span></span><span></span><span></span>
-      </div>
-    </div>
-    <div style="margin-top:10px;color:var(--muted);font-size:12px;" id="operator-name"></div>
-  </div>
-
-  <!-- Last Rotate -->
-  <div class="card">
-    <div class="card-title">Last IP Rotation</div>
-    <div class="value" style="font-size:15px;" id="last-rotate">Never</div>
-    <div style="margin-top:8px;font-size:12px;color:var(--muted);" id="last-rotate-detail"></div>
-  </div>
-
-</div>
-
-<!-- Dongle List -->
-<div style="padding: 0 24px 16px;">
-  <div class="card">
-    <div class="card-title">Connected Dongles</div>
-    <div class="dongle-list" id="dongle-list">
-      <div style="color:var(--muted);font-size:13px;">Loading…</div>
-    </div>
-  </div>
-</div>
+<div id="dongle-grid"></div>
+<div id="no-dongles">No dongles detected. Check connections.</div>
 
 <!-- Log Viewer -->
 <div id="logs-wrap">
   <div id="logs-title">
     <span>Recent Logs</span>
-    <button class="btn" style="font-size:11px;padding:3px 10px;background:var(--surface);border:1px solid var(--border);"
-            onclick="loadLogs()">&#8635; Refresh</button>
+    <button onclick="loadLogs()" style="background:var(--surface);border:1px solid var(--border);color:var(--muted);padding:2px 8px;border-radius:4px;font-size:10px;cursor:pointer;">&#8635; Refresh</button>
   </div>
-  <div id="logs">Loading logs…</div>
+  <div id="logs">Loading…</div>
 </div>
 
 <div id="toast"></div>
@@ -397,6 +351,8 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
 const AUTO_REFRESH_S = 10;
 let countdown = AUTO_REFRESH_S;
 let refreshTimer;
+// Track last rotate time per dongle index
+const lastRotate = {};
 
 function toast(msg, ok = true) {
   const el = document.getElementById('toast');
@@ -410,92 +366,139 @@ function apiFetch(path, opts = {}) {
   return fetch(path, opts).then(r => r.json());
 }
 
-function fmtUptime(seconds) {
-  const d = Math.floor(seconds / 86400);
-  const h = Math.floor((seconds % 86400) / 3600);
-  const m = Math.floor((seconds % 3600) / 60);
-  const s = Math.floor(seconds % 60);
+function fmtUptime(s) {
+  const d = Math.floor(s/86400), h = Math.floor((s%86400)/3600), m = Math.floor((s%3600)/60);
   if (d > 0) return `Up ${d}d ${h}h`;
   if (h > 0) return `Up ${h}h ${m}m`;
-  return `Up ${m}m ${s}s`;
-}
-
-function setSignal(level) {
-  const bars = document.querySelectorAll('#signal-bar span');
-  bars.forEach((b, i) => {
-    b.classList.toggle('active', i < level);
-  });
+  return `Up ${m}m ${Math.floor(s%60)}s`;
 }
 
 function connBadgeClass(s) {
   if (s === 'connected')    return 'badge-green';
   if (s === 'disconnected') return 'badge-red';
-  if (s.includes('ing'))    return 'badge-yellow';
+  if (s && s.includes('ing')) return 'badge-yellow';
   return 'badge-grey';
 }
 
-function loadStatus() {
-  apiFetch('/api/status').then(d => {
-    document.getElementById('current-ip').textContent = d.current_ip || '–';
-    document.getElementById('uptime').textContent     = fmtUptime(d.uptime_seconds || 0);
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
 
-    const pb = document.getElementById('proxy-badge');
-    pb.textContent = d.proxy_running ? 'Running' : 'Stopped';
-    pb.className   = 'badge ' + (d.proxy_running ? 'badge-green' : 'badge-red');
-    document.getElementById('proxy-port').textContent = d.proxy_running ? `:{{ proxy_port }}` : '';
-
-    const cb = document.getElementById('conn-badge');
-    cb.textContent = d.connection_status || '–';
-    cb.className   = 'badge ' + connBadgeClass(d.connection_status || '');
-
-    document.getElementById('net-type').textContent = d.network_type || '';
-    setSignal(parseInt(d.signal_icon) || 0);
-
-    if (d.last_rotate) {
-      document.getElementById('last-rotate').textContent = new Date(d.last_rotate * 1000).toLocaleTimeString();
-      document.getElementById('last-rotate-detail').textContent =
-        d.last_rotate_result ? `${d.last_rotate_result.old_ip} → ${d.last_rotate_result.new_ip}` : '';
-    }
-  }).catch(() => toast('Status fetch failed', false));
+function setDongleSignal(idx, level) {
+  const bar = document.getElementById('signal-' + idx);
+  if (!bar) return;
+  bar.querySelectorAll('span').forEach((b, i) => b.classList.toggle('active', i < level));
 }
 
 function rotateDongle(idx) {
   const btn = document.getElementById('btn-rotate-' + idx);
-  if (btn) { btn.disabled = true; btn.textContent = '…'; }
-  toast('Rotating dongle ' + idx + ' IP…');
+  const sp  = document.getElementById('spin-' + idx);
+  if (btn) btn.disabled = true;
+  if (sp)  sp.style.display = 'inline-block';
+  toast('Rotating dongle ' + idx + '…');
   apiFetch('/api/rotate/' + idx, { method: 'POST' }).then(d => {
     if (d.success) {
-      toast('Dongle ' + idx + ' new IP: ' + d.new_ip + ' (was ' + (d.old_ip || '?') + ')');
+      lastRotate[idx] = { time: new Date(), old_ip: d.old_ip, new_ip: d.new_ip };
+      toast('Dongle ' + idx + ': ' + d.old_ip + ' → ' + d.new_ip);
+      // Update IP immediately
+      const ipEl = document.getElementById('ip-' + idx);
+      if (ipEl && d.new_ip) ipEl.textContent = d.new_ip;
+      updateLastRotateDisplay(idx);
     } else {
       toast('Rotation failed: ' + (d.error || 'unknown'), false);
     }
-    loadStatus(); loadDongles(); loadLogs();
+    loadLogs();
   }).catch(() => toast('Rotate request failed', false))
-    .finally(() => { if (btn) { btn.disabled = false; btn.textContent = '⟳ Rotate'; } });
+    .finally(() => {
+      if (btn) btn.disabled = false;
+      if (sp)  sp.style.display = 'none';
+    });
+}
+
+function updateLastRotateDisplay(idx) {
+  const el = document.getElementById('last-' + idx);
+  if (!el) return;
+  const r = lastRotate[idx];
+  if (!r) { el.textContent = 'Never rotated'; return; }
+  el.textContent = r.time.toLocaleTimeString() + '  ' + (r.old_ip||'?') + ' → ' + (r.new_ip||'?');
+}
+
+function proxyPort(idx) {
+  return {{ proxy_port }} + idx;
 }
 
 function loadDongles() {
-  apiFetch('/api/dongles').then(d => {
-    const list = document.getElementById('dongle-list');
-    if (!d.dongles || d.dongles.length === 0) {
-      list.innerHTML = '<div style="color:var(--muted);font-size:13px;">No dongles detected.</div>';
+  apiFetch('/api/dongles').then(data => {
+    const active = (data.dongles || []).filter(g => g.status === 'connected' || g.ip);
+    const grid = document.getElementById('dongle-grid');
+    const noEl = document.getElementById('no-dongles');
+
+    if (active.length === 0) {
+      grid.style.display = 'none';
+      noEl.style.display = 'block';
       return;
     }
-    list.innerHTML = d.dongles.map(g => `
-      <div class="dongle-item">
-        <div class="dname" style="display:flex;justify-content:space-between;align-items:center;">
-          <span>Dongle ${g.index !== undefined ? g.index : ''} — ${g.host}${g.interface ? ' (' + g.interface + ')' : ''}</span>
-          <button class="btn btn-primary" id="btn-rotate-${g.index}" style="padding:4px 10px;font-size:11px;"
-                  onclick="rotateDongle(${g.index})">&#8635; Rotate</button>
-        </div>
-        <div class="dmeta" style="margin-top:4px;">
-          <span class="badge ${connBadgeClass(g.status)}" style="font-size:11px;">${g.status}</span>
-          &nbsp;IP: ${g.ip || '–'}
-        </div>
-      </div>
-    `).join('');
-    document.getElementById('operator-name').textContent = '';
+    grid.style.display = 'grid';
+    noEl.style.display = 'none';
+
+    // Build or update cards
+    active.forEach(g => {
+      const idx = g.index;
+      let card = document.getElementById('dcard-' + idx);
+      const isNew = !card;
+
+      if (isNew) {
+        card = document.createElement('div');
+        card.className = 'dcard';
+        card.id = 'dcard-' + idx;
+        card.innerHTML = `
+          <div class="dcard-header">
+            <div class="dcard-title">Dongle ${idx} <small>${g.host}</small></div>
+            <div class="signal-bar" id="signal-${idx}">
+              <span></span><span></span><span></span><span></span><span></span>
+            </div>
+          </div>
+          <div class="ip-value" id="ip-${idx}">–</div>
+          <div class="dcard-meta">
+            <span class="badge badge-grey" id="status-${idx}">–</span>
+            <span style="color:var(--muted);font-size:12px;" id="nettype-${idx}"></span>
+          </div>
+          <div class="dcard-proxy" id="proxy-info-${idx}"></div>
+          <div class="dcard-last" id="last-${idx}">Never rotated</div>
+          <button class="btn btn-primary" id="btn-rotate-${idx}" onclick="rotateDongle(${idx})">
+            <div class="spinner" id="spin-${idx}"></div>
+            &#8635; Rotate IP
+          </button>
+        `;
+        grid.appendChild(card);
+      }
+
+      // Update values
+      document.getElementById('ip-' + idx).textContent = g.ip || '–';
+      const sb = document.getElementById('status-' + idx);
+      sb.textContent = g.status || '–';
+      sb.className = 'badge ' + connBadgeClass(g.status);
+      document.getElementById('nettype-' + idx).textContent = g.status === 'connected' ? 'LTE/4G' : '';
+      setDongleSignal(idx, g.status === 'connected' ? 4 : 0);
+
+      const port = proxyPort(idx);
+      document.getElementById('proxy-info-' + idx).textContent = `SOCKS5 :${port}  ·  /api/rotate/${idx}`;
+
+      updateLastRotateDisplay(idx);
+    });
+
+    // Remove cards for dongles no longer active
+    grid.querySelectorAll('.dcard').forEach(card => {
+      const id = parseInt(card.id.replace('dcard-',''));
+      if (!active.find(g => g.index === id)) card.remove();
+    });
   });
+}
+
+function loadStatus() {
+  apiFetch('/api/status').then(d => {
+    document.getElementById('uptime').textContent = fmtUptime(d.uptime_seconds || 0);
+  }).catch(() => {});
 }
 
 function loadLogs() {
@@ -511,33 +514,6 @@ function loadLogs() {
   });
 }
 
-function escHtml(s) {
-  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
-}
-
-function rotateIp() {
-  const btn = document.getElementById('btn-rotate');
-  const sp  = document.getElementById('spinner');
-  btn.disabled = true; sp.style.display = 'block';
-  toast('Rotating IP – this may take up to 60s…');
-  apiFetch('/api/rotate', { method: 'POST' }).then(d => {
-    if (d.success) {
-      toast(`New IP: ${d.new_ip} (was ${d.old_ip})`);
-    } else {
-      toast(`Rotation failed: ${d.error || 'unknown'}`, false);
-    }
-    loadStatus(); loadLogs();
-  }).catch(() => toast('Rotate request failed', false))
-    .finally(() => { btn.disabled = false; sp.style.display = 'none'; });
-}
-
-function proxyAction(action) {
-  apiFetch('/api/proxy/' + action, { method: 'POST' }).then(d => {
-    toast(d.message || (action === 'start' ? 'Proxy started' : 'Proxy stopped'), d.success !== false);
-    loadStatus();
-  }).catch(() => toast('Proxy action failed', false));
-}
-
 function refreshAll() {
   loadStatus();
   loadDongles();
@@ -549,11 +525,8 @@ function startCountdown() {
   countdown = AUTO_REFRESH_S;
   refreshTimer = setInterval(() => {
     countdown--;
-    document.getElementById('refresh-countdown').textContent = `Auto-refresh in ${countdown}s`;
-    if (countdown <= 0) {
-      refreshAll();
-      countdown = AUTO_REFRESH_S;
-    }
+    document.getElementById('refresh-countdown').textContent = `Refresh in ${countdown}s`;
+    if (countdown <= 0) { refreshAll(); countdown = AUTO_REFRESH_S; }
   }, 1000);
 }
 

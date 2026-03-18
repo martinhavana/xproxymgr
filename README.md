@@ -22,12 +22,12 @@
 
 ## What This System Does
 
-1. **SOCKS5 proxy** on port 1080 via `dante-server` (danted)
+1. **SOCKS5 proxy** on port 1080 (dongle 0, True) and port 1081 (dongle 1, DTAC) via `dante-server` (danted)
 2. **IP rotation** via XH22 native API — new IP in ~5 seconds, **every time**
-3. **Web dashboard** at `http://192.168.1.107:8080` — shows IP, connection status, per-dongle rotate buttons
-4. **REST API** at port 8080 — `/api/status`, `/api/rotate`, `/api/dongles`, etc.
+3. **Web dashboard** at `http://192.168.1.107:8080` — per-dongle cards with IP, signal, status, rotate button
+4. **REST API** at port 8080 — `/api/status`, `/api/rotate/<idx>`, `/api/dongles`, etc.
 5. **Background monitor** — polls dongle + proxy status every 15s
-6. **Multi-dongle support** — each XH22 managed independently
+6. **Multi-dongle support** — each XH22 managed independently, auto-detected
 7. **External access** — AIS Fibre port forwarding + DuckDNS (`havanawin.duckdns.org`)
 
 ---
@@ -231,34 +231,68 @@ chmod +x /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
 
 ---
 
-## danted Configuration
+## danted Configuration (Two Dongles)
 
-Working `/etc/danted.conf` (two common gotchas fixed):
+Two separate danted instances, each bound to a specific dongle subnet IP (not interface name — avoids eth1/eth2 swap issues).
 
+**`/etc/danted-dongle0.conf`** (True, port 1080):
 ```
 logoutput: syslog
 internal: 0.0.0.0 port = 1080
-external: eth1
+external: 192.168.101.100
 clientmethod: none
 socksmethod: none
 user.privileged: root
 user.notprivileged: nobody
+client pass { from: 0.0.0.0/0 to: 0.0.0.0/0; log: connect disconnect error }
+socks pass { from: 0.0.0.0/0 to: 0.0.0.0/0; socksmethod: none; log: connect disconnect error }
+```
 
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect disconnect error
-}
+**`/etc/danted-dongle1.conf`** (DTAC, port 1081):
+```
+logoutput: syslog
+internal: 0.0.0.0 port = 1081
+external: 192.168.102.100
+clientmethod: none
+socksmethod: none
+user.privileged: root
+user.notprivileged: nobody
+client pass { from: 0.0.0.0/0 to: 0.0.0.0/0; log: connect disconnect error }
+socks pass { from: 0.0.0.0/0 to: 0.0.0.0/0; socksmethod: none; log: connect disconnect error }
+```
 
-socks pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    socksmethod: none
-    log: connect disconnect error
-}
+**`/usr/local/bin/danted-wrapper`** (keeps foreground process alive for systemd `Type=simple`):
+```bash
+#!/bin/bash
+CONFIG=$1
+PORT=$2
+/usr/sbin/danted -f "$CONFIG"
+sleep 2
+while ss -tlnp | grep -q ":$PORT "; do
+    sleep 5
+done
+exit 1
+```
+
+**`/etc/systemd/system/danted-dongle0.service`** (same pattern for dongle1):
+```ini
+[Unit]
+Description=SOCKS5 proxy - Dongle 0 port 1080
+After=network.target
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/danted-wrapper /etc/danted-dongle0.conf 1080
+Restart=always
+RestartSec=5
+[Install]
+WantedBy=multi-user.target
 ```
 
 **Gotchas:**
 - `logoutput: syslog` — NOT `/var/log/danted.log` (read-only filesystem at startup causes daemon crash)
 - `socksmethod: none` — NOT `socksmethod: username none` (the `username` keyword breaks auth-free setup)
+- `external: 192.168.101.100` (IP, not interface name) — avoids eth1/eth2 swap problem on reboot/replug
+- systemd `Type=simple` with wrapper script — danted daemonizes (parent exits), causing `Type=forking` PIDFile timeout
 
 ---
 
@@ -569,10 +603,13 @@ CRITICAL TECHNICAL FACTS — XH22 DONGLE API:
    - ONLY file=router reliably changes IP (forces carrier to release lease)
 6. Dongle credentials: admin/admin
 
-DANTED CONFIG (/etc/danted.conf):
+DANTED (two instances, IP-based binding — survives eth1/eth2 swap):
+- /etc/danted-dongle0.conf: internal port 1080, external 192.168.101.100
+- /etc/danted-dongle1.conf: internal port 1081, external 192.168.102.100
+- systemd: danted-dongle0.service + danted-dongle1.service (Type=simple + wrapper script)
+- Wrapper /usr/local/bin/danted-wrapper keeps foreground alive (danted daemonizes otherwise → PIDFile timeout)
 - logoutput: syslog  (NOT a file path — read-only filesystem at boot causes crash)
 - socksmethod: none  (NOT "username none" — that breaks auth-free setup)
-- external: eth1
 
 CODE STRUCTURE:
 - hilink.py: XH22Client class — _login(), _auth(), _api_get(), rotate_ip() uses file=router
@@ -586,10 +623,12 @@ HOW WE GAINED ROOT (for reference):
 - Modified etc/system_crontab.cron to inject SSH pubkey
 - POST /v2/system_restore with modified ZIP → cron ran → SSH access
 
-CURRENT STATUS: All working as of 2026-03-18.
-- SOCKS5: havanawin.duckdns.org:1080 (confirmed working from hotspot)
-- Dashboard: http://havanawin.duckdns.org:8080
-- Rotation test: curl http://havanawin.duckdns.org:8080/api/rotate/0
+CURRENT STATUS: All working as of 2026-03-18 (v1.6.0).
+- SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
+- SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
+- Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
+- Rotate dongle 0: curl http://havanawin.duckdns.org:8080/api/rotate/0
+- Rotate dongle 1: curl http://havanawin.duckdns.org:8080/api/rotate/1
 - GitHub: https://github.com/martinhavana/xproxymgr
 
 I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
@@ -598,6 +637,26 @@ I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 ---
 
 ## Version History
+
+### v1.6.0 — Dashboard redesign: per-dongle cards
+
+- **Removed** single WAN IP card, single signal bar, SOCKS5 Start/Stop buttons
+- **Added** dynamic per-dongle cards — only active (connected or has IP) dongles shown
+- Each card: IP, signal bar, connection status badge, network type, SOCKS5 port info, last rotate result, Rotate button
+- Proxy port auto-calculated per dongle: `1080 + index` (dongle 0 = 1080, dongle 1 = 1081)
+- Dashboard JS rebuilds cards on every poll, updating values in place
+- `hilink.py`: `get_current_ip()` now uses correct subnet bind IP (`192.168.10x.100`) derived from host, instead of hardcoded `eth1`
+
+### v1.5.0 — Second dongle (DTAC) + two danted instances + IP-based routing
+
+- **Added XH22 dongle 1 (DTAC)** — fully working alongside dongle 0 (True)
+- **Two danted instances**: `danted-dongle0.service` (port 1080) and `danted-dongle1.service` (port 1081)
+  - Each bound to subnet IP (not interface name): `external: 192.168.101.100` / `external: 192.168.102.100`
+  - Uses wrapper script to keep foreground process alive for systemd `Type=simple`
+- **IP-based policy routing**: routing script uses `case "$ip"` match instead of `$IFACE` name — survives eth1/eth2 interface swap on reboot/replug
+- **Router port forwarding**: added `DTAC-SOCKS5` rule — ext 1081 → 192.168.1.107:1081
+- **External access**: `havanawin.duckdns.org:1080` (True) + `havanawin.duckdns.org:1081` (DTAC) both working
+- **Config**: `DONGLE_HOSTS` updated to scan 192.168.101.1–105.1 (auto-detect up to 5 dongles)
 
 ### v1.4.0 — External access + GET rotate endpoints + routing fix
 

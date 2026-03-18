@@ -176,11 +176,14 @@ class XH22Client:
         return state
 
     def get_current_ip(self) -> Optional[str]:
-        """Get current WAN (public) IP via external check on eth1."""
+        """Get current WAN (public) IP via external check using the dongle's subnet IP."""
         try:
+            # Derive the local bind IP from host: 192.168.101.1 → 192.168.101.100
+            parts = self.host.split(".")
+            bind_ip = f"{parts[0]}.{parts[1]}.{parts[2]}.100"
             result = subprocess.run(
                 ["curl", "-s", "--connect-timeout", "8",
-                 "--interface", "eth1", "https://api.ipify.org"],
+                 "--interface", bind_ip, "https://api.ipify.org"],
                 capture_output=True, text=True, timeout=12
             )
             ip = result.stdout.strip()
