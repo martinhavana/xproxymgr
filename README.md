@@ -152,12 +152,24 @@ Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 | Dashboard | `http://havanawin.duckdns.org:8080` |
 | IP Rotate (AdsPower) | `http://havanawin.duckdns.org:8080/api/rotate/0` |
 
-**Router port forwarding (AIS Fibre F6107A):**
+**Router: AIS Fibre F6107A** — Port Forwarding rules (Internet → Security → Port Forwarding):
 
-| External Port | Internal IP | Internal Port | Purpose |
-|---------------|-------------|---------------|---------|
-| 1080 | 192.168.1.107 | 1080 | SOCKS5 proxy |
-| 8080 | 192.168.1.107 | 8080 | Dashboard + API |
+| Rule name | External port | Internal IP | Internal port | Protocol | Purpose |
+|-----------|--------------|-------------|---------------|----------|---------|
+| SOCKS5 | **1080** | 192.168.1.107 | 1080 | TCP | XB22 SOCKS5 proxy ✅ |
+| ProxyAPI | **8080** | 192.168.1.107 | 8080 | TCP | XB22 dashboard + API ✅ |
+| HTTP-Proxy | 4201 | 192.168.1.151 | 4201 | TCP | Mac Mini backup (keep, do not delete) |
+| Android-SOCKS5 | 5301 | 192.168.1.151 | 5301 | TCP | Mac Mini backup (keep, do not delete) |
+| XProxyMgr | 5050 | 192.168.1.151 | 5050 | TCP | Mac Mini backup (keep, do not delete) |
+
+> **192.168.1.107** = XProxy XB22 (MAC: `02:03:76:f0:1b:bb`)
+> **192.168.1.151** = old Mac Mini proxy (backup rules — do not touch)
+
+**DHCP Binding (Local Network → IPv4 → DHCP Binding):**
+
+| Device | MAC | Fixed IP |
+|--------|-----|----------|
+| XProxy XB22 | `02:03:76:f0:1b:bb` | `192.168.1.107` |
 
 > ⚠️ **Hairpin NAT not supported on AIS Fibre F6107A.**
 > You CANNOT test via public IP (`havanawin.duckdns.org`) from inside the same LAN.
@@ -489,11 +501,21 @@ SERVICES RUNNING:
 
 EXTERNAL ACCESS:
 - DuckDNS domain: havanawin.duckdns.org → 58.136.146.0 (AIS Fibre public IP)
-- Router: AIS Fibre F6107A — port forward 1080→192.168.1.107:1080, 8080→192.168.1.107:8080
+- Router: AIS Fibre F6107A — login at http://192.168.1.1 (admin / password)
 - SOCKS5 (anywhere): havanawin.duckdns.org:1080
 - Dashboard (anywhere): http://havanawin.duckdns.org:8080
 - Rotate URL (AdsPower GET): http://havanawin.duckdns.org:8080/api/rotate/0
 - ⚠️ Hairpin NAT NOT supported on AIS F6107A — test from hotspot, not home WiFi
+
+ROUTER PORT FORWARDING (Internet → Security → Port Forwarding):
+- SOCKS5:        ext 1080 → 192.168.1.107:1080  TCP  [XB22 proxy]
+- ProxyAPI:      ext 8080 → 192.168.1.107:8080  TCP  [XB22 dashboard/API]
+- HTTP-Proxy:    ext 4201 → 192.168.1.151:4201  TCP  [Mac Mini backup — DO NOT DELETE]
+- Android-SOCKS5:ext 5301 → 192.168.1.151:5301  TCP  [Mac Mini backup — DO NOT DELETE]
+- XProxyMgr:     ext 5050 → 192.168.1.151:5050  TCP  [Mac Mini backup — DO NOT DELETE]
+
+DHCP BINDING (Local Network → IPv4 → DHCP Binding):
+- XProxy XB22: MAC 02:03:76:f0:1b:bb → fixed IP 192.168.1.107
 
 POLICY ROUTING (critical — without this SOCKS5 times out):
 - Traffic from eth1 (192.168.101.100) must exit via eth1, not eth0
