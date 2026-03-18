@@ -190,9 +190,38 @@ def _tg_alert(msg: str) -> None:
     except Exception as exc:
         logger.warning("[tg_alert] %s", exc)
 
-# State: name → datetime first failure | None,  set of names already alerted
+# State: persisted to disk so it survives restarts
+_ALERT_STATE_FILE = "/var/lib/xproxymgr/alert_state.json"
 _proxy_down_since: dict = {}
 _proxy_alerted:    set  = set()
+
+def _save_alert_state() -> None:
+    try:
+        os.makedirs(os.path.dirname(_ALERT_STATE_FILE), exist_ok=True)
+        state = {
+            "alerted": list(_proxy_alerted),
+            "down_since": {k: v.isoformat() if v else None
+                           for k, v in _proxy_down_since.items()},
+        }
+        with open(_ALERT_STATE_FILE, "w") as f:
+            json.dump(state, f)
+    except Exception as exc:
+        logger.warning("[alert_state] save error: %s", exc)
+
+def _load_alert_state() -> None:
+    try:
+        if not os.path.exists(_ALERT_STATE_FILE):
+            return
+        with open(_ALERT_STATE_FILE) as f:
+            state = json.load(f)
+        _proxy_alerted.update(state.get("alerted", []))
+        for k, v in state.get("down_since", {}).items():
+            _proxy_down_since[k] = datetime.fromisoformat(v).replace(tzinfo=_BANGKOK_TZ) if v else None
+        logger.info("[alert_state] Loaded: alerted=%s", _proxy_alerted)
+    except Exception as exc:
+        logger.warning("[alert_state] load error: %s", exc)
+
+_load_alert_state()
 
 def _proxy_down(name: str, ok: bool, ip: Optional[str] = None) -> None:
     now = _bkk_now()
@@ -206,10 +235,12 @@ def _proxy_down(name: str, ok: bool, ip: Optional[str] = None) -> None:
             logger.info("[tg_alert] RECOVERY %s", name)
             _tg_alert(msg)
             _proxy_alerted.discard(name)
+            _save_alert_state()
         _proxy_down_since[name] = None
     else:
         if _proxy_down_since.get(name) is None:
             _proxy_down_since[name] = now
+            _save_alert_state()
             logger.warning("[tg_alert] %s nie odpowiada od %s", name, now.strftime("%H:%M:%S"))
         elif name not in _proxy_alerted:
             secs = (now - _proxy_down_since[name]).total_seconds()
@@ -221,6 +252,7 @@ def _proxy_down(name: str, ok: bool, ip: Optional[str] = None) -> None:
                 logger.error("[tg_alert] ALERT %s down %d min", name, mins)
                 _tg_alert(msg)
                 _proxy_alerted.add(name)
+                _save_alert_state()
 
 def _proxy_alert_watchdog() -> None:
     """Every PROXY_CHECK_INTERVAL seconds tests each SOCKS5 proxy via ipify.
