@@ -174,9 +174,7 @@ Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 |--------|-----|----------|
 | XProxy XB22 | `02:03:76:f0:1b:bb` | `192.168.1.107` |
 
-> ⚠️ **Hairpin NAT not supported on AIS Fibre F6107A.**
-> You CANNOT test via public IP (`havanawin.duckdns.org`) from inside the same LAN.
-> Always test from a hotspot / external network.
+> AIS Fibre F6107A **supports hairpin NAT** — `havanawin.duckdns.org` works from the same LAN.
 
 ---
 
@@ -528,7 +526,7 @@ The `/api/rotate/<index>` endpoint rotates by dongle index (0-based).
 | fail2ban blocking SSH | Too many failed attempts | Wait 10min or `fail2ban-client unban <ip>` |
 | SOCKS5 connection times out externally | Policy routing missing | `ip rule add from 192.168.101.100 table 101` + `ip route add default via 192.168.101.1 dev eth1 table 101` |
 | danted fails to start | Log file read-only at boot | Use `logoutput: syslog` in danted.conf, not a file path |
-| Can't reach proxy via DuckDNS from home LAN | Hairpin NAT not supported on AIS F6107A | Test from hotspot / external network only |
+| Can't reach proxy via DuckDNS from home LAN | Port forwarding rule missing in router | Check rules in router: Internet → Security → Port Forwarding |
 | xproxymgr crash: `AttributeError: module 'config' has no attribute 'DONGLE_HOSTS'` | Old config.py on device | Deploy ALL Python files together: `scp app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/` |
 
 ---
@@ -574,7 +572,7 @@ EXTERNAL ACCESS:
 - Dashboard (anywhere): http://havanawin.duckdns.org:8080
 - Rotate dongle 0 (AdsPower): http://havanawin.duckdns.org:8080/api/rotate/0
 - Rotate dongle 1 (AdsPower): http://havanawin.duckdns.org:8080/api/rotate/1
-- ⚠️ Hairpin NAT NOT supported on AIS F6107A — test from hotspot, not home WiFi
+- AIS F6107A supports hairpin NAT — havanawin.duckdns.org works from home WiFi too
 
 ROUTER PORT FORWARDING (Internet → Security → Port Forwarding):
 - SOCKS5:        ext 1080 → 192.168.1.107:1080  TCP  [Dongle 0 True]
