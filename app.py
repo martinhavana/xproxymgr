@@ -11,8 +11,10 @@ import os
 import threading
 import time
 from collections import deque
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from typing import Any, Dict
+
+import requests
 
 from flask import Flask, jsonify, render_template_string, request
 
@@ -169,6 +171,89 @@ def _monitor_loop() -> None:
 
 _monitor_thread = threading.Thread(target=_monitor_loop, daemon=True, name="monitor")
 _monitor_thread.start()
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Telegram proxy alert watchdog
+# ─────────────────────────────────────────────────────────────────────────────
+
+_BANGKOK_TZ = timezone(timedelta(hours=7))
+
+def _bkk_now() -> datetime:
+    return datetime.now(_BANGKOK_TZ)
+
+def _tg_alert(msg: str) -> None:
+    """Send Telegram message (fire-and-forget, never raises)."""
+    try:
+        url = f"https://api.telegram.org/bot{config.TG_TOKEN}/sendMessage"
+        requests.post(url, json={"chat_id": config.TG_CHAT_ID, "text": msg,
+                                 "parse_mode": "Markdown"}, timeout=10)
+    except Exception as exc:
+        logger.warning("[tg_alert] %s", exc)
+
+# State: name → datetime first failure | None,  set of names already alerted
+_proxy_down_since: dict = {}
+_proxy_alerted:    set  = set()
+
+def _proxy_down(name: str, ok: bool, ip: str | None = None) -> None:
+    now = _bkk_now()
+    if ok:
+        if name in _proxy_alerted:
+            since = _proxy_down_since.get(name)
+            dur   = int((now - since).total_seconds() / 60) if since else 0
+            msg   = (f"✅ *{name}* — proxy wróciło!\n"
+                     f"IP: `{ip}`\n"
+                     f"Czas awarii: {dur} min")
+            logger.info("[tg_alert] RECOVERY %s", name)
+            _tg_alert(msg)
+            _proxy_alerted.discard(name)
+        _proxy_down_since[name] = None
+    else:
+        if _proxy_down_since.get(name) is None:
+            _proxy_down_since[name] = now
+            logger.warning("[tg_alert] %s nie odpowiada od %s", name, now.strftime("%H:%M:%S"))
+        elif name not in _proxy_alerted:
+            secs = (now - _proxy_down_since[name]).total_seconds()
+            if secs >= config.PROXY_DOWN_GRACE:
+                mins = int(secs / 60)
+                msg  = (f"🔴 *{name}* — proxy nie działa!\n"
+                        f"Czas awarii: {mins} min\n"
+                        f"Sprawdź zasięg dongla / restart.")
+                logger.error("[tg_alert] ALERT %s down %d min", name, mins)
+                _tg_alert(msg)
+                _proxy_alerted.add(name)
+
+def _proxy_alert_watchdog() -> None:
+    """Every PROXY_CHECK_INTERVAL seconds tests each SOCKS5 proxy via ipify.
+    Sends Telegram alert when proxy is down > PROXY_DOWN_GRACE seconds,
+    and a recovery message when it comes back."""
+    dongle_names = ["True",  "DTAC"]   # order matches DONGLE_HOSTS / SOCKS5_PORTS
+    socks5_ports = [int(p.strip()) for p in config.SOCKS5_PORTS.split(",") if p.strip()]
+
+    logger.info("[proxy_watchdog] Started (grace=%ds, check=%ds, ports=%s)",
+                config.PROXY_DOWN_GRACE, config.PROXY_CHECK_INTERVAL, socks5_ports)
+    time.sleep(60)   # wait for services to fully start
+
+    while True:
+        try:
+            for idx, port in enumerate(socks5_ports):
+                name     = dongle_names[idx] if idx < len(dongle_names) else f"Dongle-{idx}"
+                label    = f"Dongle-{name} (:{port})"
+                proxy_url = f"socks5h://127.0.0.1:{port}"
+                try:
+                    r  = requests.get("https://api4.ipify.org", timeout=12,
+                                      proxies={"https": proxy_url, "http": proxy_url})
+                    ip = r.text.strip()
+                    _proxy_down(label, ok=True, ip=ip)
+                except Exception:
+                    _proxy_down(label, ok=False)
+        except Exception as exc:
+            logger.warning("[proxy_watchdog] Error: %s", exc)
+
+        time.sleep(config.PROXY_CHECK_INTERVAL)
+
+threading.Thread(target=_proxy_alert_watchdog, daemon=True, name="proxy_watchdog").start()
+logger.info("[proxy_watchdog] Thread launched (grace=%ds, check=%ds)",
+            config.PROXY_DOWN_GRACE, config.PROXY_CHECK_INTERVAL)
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Flask app

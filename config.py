@@ -58,3 +58,15 @@ MONITOR_INTERVAL = int(os.environ.get("MONITOR_INTERVAL", 15))
 # Log ring-buffer size (lines kept in memory for /api/logs)
 # ─────────────────────────────────────────────
 LOG_BUFFER_SIZE = int(os.environ.get("LOG_BUFFER_SIZE", 200))
+
+# ─────────────────────────────────────────────
+# Telegram alerts
+# ─────────────────────────────────────────────
+TG_TOKEN        = os.environ.get("TG_TOKEN",   "8705907799:AAF5jJYCYPx3rNkSZ6B-b2agHp-30aDxh7g")
+TG_CHAT_ID      = os.environ.get("TG_CHAT_ID", "435328284")
+# Seconds of downtime before sending alert (grace period)
+PROXY_DOWN_GRACE     = int(os.environ.get("PROXY_DOWN_GRACE",     120))
+# How often to check SOCKS5 proxies (seconds)
+PROXY_CHECK_INTERVAL = int(os.environ.get("PROXY_CHECK_INTERVAL", 30))
+# SOCKS5 ports per dongle (order matches DONGLE_HOSTS)
+SOCKS5_PORTS    = os.environ.get("SOCKS5_PORTS", "1080,1081")
