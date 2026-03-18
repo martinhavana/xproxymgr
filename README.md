@@ -28,6 +28,7 @@
 4. **REST API** at port 8080 — `/api/status`, `/api/rotate`, `/api/dongles`, etc.
 5. **Background monitor** — polls dongle + proxy status every 15s
 6. **Multi-dongle support** — each XH22 managed independently
+7. **Tailscale VPN** — persistent access from any network via `100.97.64.109`
 
 ---
 
@@ -128,6 +129,38 @@ regardless of the actual endpoint URL.
 
 **The operator releases the IP lease only when the dongle fully disconnects from the radio network.
 `file=router` triggers `<nwrestart/>` which does exactly this. Result: new IP in ~5 seconds.**
+
+---
+
+## Access — Local & Remote
+
+### Local network (same WiFi/LAN)
+
+| Service | Address |
+|---------|---------|
+| SSH | `ssh -i ~/.ssh/id_ed25519 root@192.168.1.107` |
+| SOCKS5 | `192.168.1.107:1080` |
+| Dashboard | `http://192.168.1.107:8080` |
+
+### Any network — Tailscale (persistent) 🌍
+
+Tailscale IP: **`100.97.64.109`** (tailnet: `martinhavana.github`)
+
+| Service | Address |
+|---------|---------|
+| SSH | `ssh -i ~/.ssh/id_ed25519 root@100.97.64.109` |
+| SOCKS5 | `100.97.64.109:1080` |
+| Dashboard | `http://100.97.64.109:8080` |
+
+> **Requires Tailscale installed on your client machine**, logged in as `martinhavana.github`.
+> Install: https://tailscale.com/download
+
+```bash
+# Install Tailscale on XB22 (already done)
+curl -fsSL https://tailscale.com/install.sh | sh
+tailscale up   # generates auth URL → open in browser → Connect
+tailscale ip -4  # → 100.97.64.109
+```
 
 ---
 
@@ -368,6 +401,14 @@ HOW WE GAINED ROOT (for reference):
 - Modified etc/system_crontab.cron to inject SSH pubkey
 - POST /v2/system_restore with modified ZIP → cron ran → SSH access
 
+TAILSCALE: Installed, tailnet martinhavana.github, persistent IP 100.97.64.109
+- SSH (local):      ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
+- SSH (anywhere):   ssh -i ~/.ssh/id_ed25519 root@100.97.64.109
+- SOCKS5 (local):   192.168.1.107:1080
+- SOCKS5 (anywhere): 100.97.64.109:1080
+- Dashboard (local): http://192.168.1.107:8080
+- Dashboard (anywhere): http://100.97.64.109:8080
+
 CURRENT STATUS: All working.
 - Dashboard: http://192.168.1.107:8080
 - SOCKS5: 192.168.1.107:1080 (open, no auth)
@@ -379,6 +420,13 @@ I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 ---
 
 ## Version History
+
+### v1.3.0 — Tailscale external access
+- Installed Tailscale on XB22 (`tailscale up --reset`)
+- Device registered as `xproxy-xb22` on tailnet `martinhavana.github`
+- Persistent external IP: `100.97.64.109` (accessible from any network)
+- SOCKS5 and dashboard reachable via Tailscale IP from anywhere
+- Fixed `external: eth1` in `/etc/danted.conf` (was wrongly `eth0`)
 
 ### v1.2.0 — Dashboard fixes + multi-dongle support
 - Fixed `proxy_manager.is_running()` to check `danted` instead of `3proxy`
