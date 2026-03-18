@@ -9,7 +9,7 @@ import os
 # Dongle / Hilink settings
 # ─────────────────────────────────────────────
 DONGLE_HOST = os.environ.get("DONGLE_HOST", "192.168.101.1")
-DONGLE_HOSTS = os.environ.get("DONGLE_HOSTS", "192.168.101.1,192.168.102.1,192.168.103.1,192.168.104.1,192.168.105.1")
+DONGLE_HOSTS = os.environ.get("DONGLE_HOSTS", "192.168.101.1,192.168.102.1")
 
 # ─────────────────────────────────────────────
 # Proxy settings
@@ -17,6 +17,12 @@ DONGLE_HOSTS = os.environ.get("DONGLE_HOSTS", "192.168.101.1,192.168.102.1,192.1
 PROXY_PORT = int(os.environ.get("PROXY_PORT", 1080))
 PROXY_USER = os.environ.get("PROXY_USER", "proxy")
 PROXY_PASS = os.environ.get("PROXY_PASS", "changeme")
+
+# ─────────────────────────────────────────────
+# External access
+# ─────────────────────────────────────────────
+# Public hostname shown in dashboard access info (DuckDNS or IP)
+EXTERNAL_HOST = os.environ.get("EXTERNAL_HOST", "havanawin.duckdns.org")
 
 # ─────────────────────────────────────────────
 # Web dashboard settings

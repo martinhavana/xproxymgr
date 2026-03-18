@@ -261,10 +261,31 @@ _DASHBOARD_HTML = r"""<!DOCTYPE html>
   .signal-bar span:nth-child(3) { height: 65%; }
   .signal-bar span:nth-child(4) { height: 82%; }
   .signal-bar span:nth-child(5) { height: 100%; }
-  .dcard-proxy {
-    font-size: 11px; color: var(--muted); margin-bottom: 12px;
-    font-family: monospace;
+  .dcard-access {
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 10px 12px; margin-bottom: 12px;
   }
+  .access-row {
+    display: flex; align-items: center; gap: 8px; padding: 4px 0;
+  }
+  .access-row + .access-row {
+    border-top: 1px solid var(--border); margin-top: 4px; padding-top: 8px;
+  }
+  .access-label {
+    font-size: 10px; font-weight: 700; text-transform: uppercase;
+    letter-spacing: .6px; color: var(--muted); flex-shrink: 0; width: 52px;
+  }
+  .access-val {
+    font-family: monospace; font-size: 12px; color: var(--text);
+    flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .copy-btn {
+    flex-shrink: 0; background: var(--surface); border: 1px solid var(--border);
+    color: var(--muted); border-radius: 4px; padding: 2px 8px;
+    font-size: 11px; cursor: pointer; transition: color .15s, border-color .15s;
+  }
+  .copy-btn:hover { color: var(--accent); border-color: var(--accent); }
+  .copy-btn.copied { color: var(--green); border-color: var(--green); }
   .dcard-last {
     font-size: 11px; color: var(--muted); margin-bottom: 14px; min-height: 16px;
   }
@@ -423,8 +444,27 @@ function updateLastRotateDisplay(idx) {
   el.textContent = r.time.toLocaleTimeString() + '  ' + (r.old_ip||'?') + ' → ' + (r.new_ip||'?');
 }
 
+const EXTERNAL_HOST = '{{ external_host }}';
+const WEB_PORT      = {{ web_port }};
+
 function proxyPort(idx) {
   return {{ proxy_port }} + idx;
+}
+
+function copyText(text, btn) {
+  navigator.clipboard.writeText(text).then(() => {
+    btn.textContent = 'Copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  }).catch(() => {
+    // fallback for non-HTTPS
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select(); document.execCommand('copy');
+    document.body.removeChild(ta);
+    btn.textContent = 'Copied!'; btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('copied'); }, 1500);
+  });
 }
 
 function loadDongles() {
@@ -451,6 +491,9 @@ function loadDongles() {
         card = document.createElement('div');
         card.className = 'dcard';
         card.id = 'dcard-' + idx;
+        const port = proxyPort(idx);
+        const socks5Addr = `${EXTERNAL_HOST}:${port}`;
+        const rotateUrl  = `http://${EXTERNAL_HOST}:${WEB_PORT}/api/rotate/${idx}`;
         card.innerHTML = `
           <div class="dcard-header">
             <div class="dcard-title">Dongle ${idx} <small>${g.host}</small></div>
@@ -463,7 +506,18 @@ function loadDongles() {
             <span class="badge badge-grey" id="status-${idx}">–</span>
             <span style="color:var(--muted);font-size:12px;" id="nettype-${idx}"></span>
           </div>
-          <div class="dcard-proxy" id="proxy-info-${idx}"></div>
+          <div class="dcard-access">
+            <div class="access-row">
+              <span class="access-label">SOCKS5</span>
+              <span class="access-val">${socks5Addr}</span>
+              <button class="copy-btn" onclick="copyText('${socks5Addr}', this)">Copy</button>
+            </div>
+            <div class="access-row">
+              <span class="access-label">Rotate</span>
+              <span class="access-val">${rotateUrl}</span>
+              <button class="copy-btn" onclick="copyText('${rotateUrl}', this)">Copy</button>
+            </div>
+          </div>
           <div class="dcard-last" id="last-${idx}">Never rotated</div>
           <button class="btn btn-primary" id="btn-rotate-${idx}" onclick="rotateDongle(${idx})">
             <div class="spinner" id="spin-${idx}"></div>
@@ -480,9 +534,6 @@ function loadDongles() {
       sb.className = 'badge ' + connBadgeClass(g.status);
       document.getElementById('nettype-' + idx).textContent = g.status === 'connected' ? 'LTE/4G' : '';
       setDongleSignal(idx, g.status === 'connected' ? 4 : 0);
-
-      const port = proxyPort(idx);
-      document.getElementById('proxy-info-' + idx).textContent = `SOCKS5 :${port}  ·  /api/rotate/${idx}`;
 
       updateLastRotateDisplay(idx);
     });
@@ -546,6 +597,8 @@ def dashboard():
     return render_template_string(
         _DASHBOARD_HTML,
         proxy_port=config.PROXY_PORT,
+        external_host=config.EXTERNAL_HOST,
+        web_port=config.WEB_PORT,
     )
 
 
