@@ -624,17 +624,25 @@ HOW WE GAINED ROOT (for reference):
 ROUTING FIX (2026-03-18): networkd-dispatcher was unreliable for USB ethernet → added xproxy-routing.service
 - If SOCKS5 times out after reboot: SSH in, run /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing manually
 
-SECOND BOX: XProxy XB22 v2 (MAC 02:03:1d:4a:a1:61) — runs XProxy V20.4 (expired license)
-- backup/restore exploit DOES NOT work on V20.4 (locked behind license)
-- SSH access requires HDMI + USB keyboard → GRUB recovery → passwd root
-- On hold until USB keyboard arrives
+DUCKDNS AUTO-UPDATE (2026-03-19): Cron running on XB22 every 5 minutes
+- Updates havanawin.duckdns.org automatically on any network — nothing manual needed
+- Verify: ssh root@192.168.1.107 "cat /tmp/duckdns.log"  → should output: OK
+- DuckDNS tracks ROUTER's public IP (ISP), NOT dongle IPs — dongle rotation is separate
 
-CURRENT STATUS: All working as of 2026-03-18 (v1.7.0).
+SECOND BOX: XProxy XB22 v2 (MAC 02:03:1d:4a:a1:61) — runs XProxy V20.4 (expired license)
+- backup/restore exploit DOES NOT work on V20.4
+- HDMI + USB keyboard tried: login prompt visible, password unknown, no GRUB (uses U-Boot/Armbian)
+- U-Boot does NOT output to HDMI → can't interrupt boot from keyboard
+- Remaining options: USB→UART serial adapter (~30 zł) OR Allwinner FEL mode via USB-C cable
+- On hold
+
+CURRENT STATUS: All working as of 2026-03-19 (v1.8.0).
 - SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
 - SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
 - Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
 - Rotate dongle 0: curl http://havanawin.duckdns.org:8080/api/rotate/0
 - Rotate dongle 1: curl http://havanawin.duckdns.org:8080/api/rotate/1
+- DuckDNS: auto-updating every 5 min from XB22 cron
 - GitHub: https://github.com/martinhavana/xproxymgr
 
 I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
@@ -668,15 +676,22 @@ Forward these ports to the XB22's LAN IP:
 
 ### 3. DuckDNS — Update Public IP
 
-DuckDNS auto-updates if the XB22 runs the updater, but if not:
+**Auto-update is already configured on XB22** (cron every 5 minutes — set up 2026-03-19).
+XB22 automatically detects the new public IP and updates DuckDNS. Nothing to do manually.
 
-1. Check new public IP: go to `http://whatismyip.com` from any device on the new network
-2. Update DuckDNS manually: log in at `https://www.duckdns.org`, update `havanawin` to the new IP
-3. Or set up a cron job on XB22 to auto-update:
-   ```bash
-   # On XB22 — replace TOKEN with your DuckDNS token
-   echo "*/5 * * * * curl -s 'https://www.duckdns.org/update?domains=havanawin&token=TOKEN&ip=' > /dev/null" | crontab -
-   ```
+To verify it's working after moving:
+```bash
+ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "cat /tmp/duckdns.log"
+# Should output: OK
+```
+
+If you ever need to set it up again on a fresh box (replace TOKEN with your DuckDNS token):
+```bash
+(crontab -l 2>/dev/null; echo "*/5 * * * * curl -s 'https://www.duckdns.org/update?domains=havanawin&token=TOKEN&ip=' -o /tmp/duckdns.log") | crontab -
+```
+
+> DuckDNS tracks your **router's public IP** (assigned by ISP) — NOT the dongle IPs.
+> Dongle rotation (True/DTAC IPs) is completely separate and has nothing to do with DuckDNS.
 
 ### 4. Nothing Changes on XB22 Itself
 
@@ -720,19 +735,36 @@ It runs **XProxy V20.4** (build 2023.Oct04.1938, expired free license).
 
 ### How to Gain Access to Second Box
 
-**Option A — HDMI + USB keyboard** (recommended):
-1. Connect HDMI to TV, USB keyboard to box
-2. Reboot box (unplug/replug power)
-3. If GRUB menu appears: Advanced options → recovery mode → root shell → `passwd root` → new password → `reboot`
-4. Then SSH: `sshpass -p <newpass> ssh root@192.168.1.191`
-5. Deploy xproxymgr as usual
+**Everything tried so far (2026-03-19):**
 
-**Option B — already tried, doesn't work on V20.4:**
-- `/v2/system_backup` backup/restore exploit (requires license)
+| Method | Result |
+|--------|--------|
+| `/v2/system_backup` exploit | ❌ 404 — locked behind expired license |
+| SSH + ~40 common passwords | ❌ All failed |
+| Path traversal via `/v2/vpn_service_upload` | ❌ Blocked by werkzeug `secure_filename` |
+| HDMI + USB keyboard — login prompt | ✅ Visible — but password unknown, hit lockout after 5 tries |
+| GRUB recovery mode (Shift/Esc at boot) | ❌ No GRUB — device uses **U-Boot** (Allwinner H6 / Armbian) |
+| U-Boot interrupt from HDMI | ❌ U-Boot outputs to serial only — HDMI shows nothing until kernel boots |
 
-> Second box is **on hold** until USB keyboard is available.
-> Note: box gets random DHCP IP on each reboot (no DHCP binding configured for its MAC).
-> Add DHCP binding in router: MAC `02:03:1d:4a:a1:61` → fixed IP (e.g. `192.168.1.108`) before deploying.
+**Why HDMI + keyboard doesn't fully work:**
+This device (Tanix TX6 / Allwinner H6 / Armbian) does NOT use GRUB.
+It uses U-Boot → extlinux. U-Boot outputs to serial console (UART), not HDMI.
+You can see the Linux kernel boot (systemd messages) on HDMI, but you can't interrupt U-Boot from there.
+
+**Remaining options:**
+
+**Option A — USB→UART serial adapter** (~25–40 zł on Shopee/Aliexpress) ⭐ easiest
+Connect to UART pins on the PCB, get full U-Boot terminal, add `init=/bin/bash` to boot args, change root password.
+
+**Option B — Allwinner FEL mode via USB**
+1. Get USB-C → USB-A cable (Mac to box)
+2. `brew install sunxi-tools`
+3. Hold reset button inside AV port (toothpick), power on → box enters FEL mode
+4. Use `sunxi-fel` to dump eMMC, modify `/etc/shadow`, write back
+> Caution: full eMMC dump/write is 29GB over USB — takes 1–2 hours, some brick risk
+
+> Second box remains **on hold** pending serial adapter or FEL mode attempt.
+> Add DHCP binding in router before deploying: MAC `02:03:1d:4a:a1:61` → fixed IP (e.g. `192.168.1.108`)
 
 ---
 
@@ -776,6 +808,13 @@ ip route replace default via 192.168.102.1 dev eth1 table 102   # adjust ethX
 ---
 
 ## Version History
+
+### v1.8.0 — DuckDNS auto-update + second box deep investigation
+
+- **Added** DuckDNS auto-update cron on XB22 (every 5 min) — `havanawin.duckdns.org` self-updates on any network, no manual intervention needed
+- **Investigated** second box further: HDMI + USB keyboard connected, login prompt visible, password not found (~40 attempts tried). GRUB recovery impossible — device uses U-Boot (Allwinner H6/Armbian), which does NOT output to HDMI
+- **Documented** remaining options for second box: USB→UART serial adapter or Allwinner FEL mode
+- **Updated** "Moving to a New Network" guide with DuckDNS auto-update status and clarification that DuckDNS tracks router WAN IP (not dongle IPs)
 
 ### v1.7.0 — Routing persistence fix + second box investigation
 
