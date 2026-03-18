@@ -194,7 +194,7 @@ def _tg_alert(msg: str) -> None:
 _proxy_down_since: dict = {}
 _proxy_alerted:    set  = set()
 
-def _proxy_down(name: str, ok: bool, ip: str | None = None) -> None:
+def _proxy_down(name: str, ok: bool, ip: Optional[str] = None) -> None:
     now = _bkk_now()
     if ok:
         if name in _proxy_alerted:
