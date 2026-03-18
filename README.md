@@ -148,15 +148,18 @@ Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 
 | Service | Address |
 |---------|---------|
-| SOCKS5 | `havanawin.duckdns.org:1080` |
+| SOCKS5 dongle 0 (True) | `havanawin.duckdns.org:1080` |
+| SOCKS5 dongle 1 (DTAC) | `havanawin.duckdns.org:1081` |
 | Dashboard | `http://havanawin.duckdns.org:8080` |
-| IP Rotate (AdsPower) | `http://havanawin.duckdns.org:8080/api/rotate/0` |
+| Rotate dongle 0 (True) | `http://havanawin.duckdns.org:8080/api/rotate/0` |
+| Rotate dongle 1 (DTAC) | `http://havanawin.duckdns.org:8080/api/rotate/1` |
 
 **Router: AIS Fibre F6107A** — Port Forwarding rules (Internet → Security → Port Forwarding):
 
 | Rule name | External port | Internal IP | Internal port | Protocol | Purpose |
 |-----------|--------------|-------------|---------------|----------|---------|
-| SOCKS5 | **1080** | 192.168.1.107 | 1080 | TCP | XB22 SOCKS5 proxy ✅ |
+| SOCKS5 | **1080** | 192.168.1.107 | 1080 | TCP | Dongle 0 (True) SOCKS5 ✅ |
+| DTAC-SOCKS5 | **1081** | 192.168.1.107 | 1081 | TCP | Dongle 1 (DTAC) SOCKS5 ✅ |
 | ProxyAPI | **8080** | 192.168.1.107 | 8080 | TCP | XB22 dashboard + API ✅ |
 | HTTP-Proxy | 4201 | 192.168.1.151 | 4201 | TCP | Mac Mini backup (keep, do not delete) |
 | Android-SOCKS5 | 5301 | 192.168.1.151 | 5301 | TCP | Mac Mini backup (keep, do not delete) |
@@ -179,24 +182,48 @@ Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 
 ## Policy Routing (Critical for SOCKS5 to Work)
 
-Without policy routing, danted receives SOCKS5 connections on port 1080 but **outgoing traffic via eth1 (dongle) times out** because the default route uses eth0 (lower metric), causing asymmetric routing — replies can't return via the dongle interface.
+Without policy routing, danted receives SOCKS5 connections but **outgoing traffic via dongle interfaces times out** because the default route uses eth0 (lower metric), causing asymmetric routing — replies can't return via the dongle interface.
 
-### Fix Applied
+> **Two dongles:** interface names (eth1/eth2) can **swap** on reboot or replug. The routing script uses IP-based detection, not interface names — so it always works correctly regardless of which ethX each dongle gets.
+
+### Fix Applied (both dongles)
 
 ```bash
-# Route traffic from 192.168.101.100 (eth1 IP) out via eth1 gateway
+# Dongle 0 (192.168.101.x) — whichever ethX it's on
 ip rule add from 192.168.101.100 table 101
-ip route add default via 192.168.101.1 dev eth1 table 101
+ip route add default via 192.168.101.1 dev <ethX> table 101
+
+# Dongle 1 (192.168.102.x) — whichever ethX it's on
+ip rule add from 192.168.102.100 table 102
+ip route add default via 192.168.102.1 dev <ethX> table 102
 ```
 
-### Make Persistent (networkd-dispatcher)
+### Persistent Script (IP-based, interface-agnostic)
 
 ```bash
 cat > /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing << 'EOF'
-#!/bin/sh
-if [ "$IFACE" = "eth1" ]; then
-    ip rule add from 192.168.101.100 table 101 2>/dev/null || true
-    ip route add default via 192.168.101.1 dev eth1 table 101 2>/dev/null || true
+#!/bin/bash
+setup_dongle_routing() {
+    local iface=$1
+    local ip=$(ip -4 addr show "$iface" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1)
+    [ -z "$ip" ] && return
+    case "$ip" in
+        192.168.101.*)
+            ip rule add from 192.168.101.100 table 101 2>/dev/null || true
+            ip route replace default via 192.168.101.1 dev "$iface" table 101
+            ;;
+        192.168.102.*)
+            ip rule add from 192.168.102.100 table 102 2>/dev/null || true
+            ip route replace default via 192.168.102.1 dev "$iface" table 102
+            ;;
+    esac
+}
+if [ -n "$IFACE" ]; then
+    setup_dongle_routing "$IFACE"
+else
+    for iface in $(ls /sys/class/net/ | grep '^eth'); do
+        setup_dongle_routing "$iface"
+    done
 fi
 EOF
 chmod +x /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
@@ -495,20 +522,29 @@ HARDWARE:
 
 SERVICES RUNNING:
 - xproxymgr (Flask): port 8080 — web dashboard + REST API
-- danted (SOCKS5): port 1080 — no auth, open to world
+- danted-dongle0 (SOCKS5): port 1080 — dongle 0 (True), no auth
+- danted-dongle1 (SOCKS5): port 1081 — dongle 1 (DTAC), no auth
 - Deploy command: scp -i ~/.ssh/id_ed25519 app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/ && ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "systemctl restart xproxymgr"
 - ALWAYS deploy ALL .py files together (config.py must stay in sync with app.py)
 
+DONGLES:
+- Dongle 0 (True):  panel 192.168.101.1, subnet 192.168.101.x, SOCKS5 port 1080
+- Dongle 1 (DTAC):  panel 192.168.102.1, subnet 192.168.102.x, SOCKS5 port 1081
+- ⚠️ Interface names (eth1/eth2) can SWAP on reboot — routing script uses IP-based detection
+
 EXTERNAL ACCESS:
 - DuckDNS domain: havanawin.duckdns.org → 58.136.146.0 (AIS Fibre public IP)
-- Router: AIS Fibre F6107A — login at http://192.168.1.1 (admin / password)
-- SOCKS5 (anywhere): havanawin.duckdns.org:1080
+- Router: AIS Fibre F6107A — login at http://192.168.1.1
+- SOCKS5 dongle 0 (True): havanawin.duckdns.org:1080
+- SOCKS5 dongle 1 (DTAC): havanawin.duckdns.org:1081
 - Dashboard (anywhere): http://havanawin.duckdns.org:8080
-- Rotate URL (AdsPower GET): http://havanawin.duckdns.org:8080/api/rotate/0
+- Rotate dongle 0 (AdsPower): http://havanawin.duckdns.org:8080/api/rotate/0
+- Rotate dongle 1 (AdsPower): http://havanawin.duckdns.org:8080/api/rotate/1
 - ⚠️ Hairpin NAT NOT supported on AIS F6107A — test from hotspot, not home WiFi
 
 ROUTER PORT FORWARDING (Internet → Security → Port Forwarding):
-- SOCKS5:        ext 1080 → 192.168.1.107:1080  TCP  [XB22 proxy]
+- SOCKS5:        ext 1080 → 192.168.1.107:1080  TCP  [Dongle 0 True]
+- DTAC-SOCKS5:   ext 1081 → 192.168.1.107:1081  TCP  [Dongle 1 DTAC]
 - ProxyAPI:      ext 8080 → 192.168.1.107:8080  TCP  [XB22 dashboard/API]
 - HTTP-Proxy:    ext 4201 → 192.168.1.151:4201  TCP  [Mac Mini backup — DO NOT DELETE]
 - Android-SOCKS5:ext 5301 → 192.168.1.151:5301  TCP  [Mac Mini backup — DO NOT DELETE]
@@ -518,10 +554,9 @@ DHCP BINDING (Local Network → IPv4 → DHCP Binding):
 - XProxy XB22: MAC 02:03:76:f0:1b:bb → fixed IP 192.168.1.107
 
 POLICY ROUTING (critical — without this SOCKS5 times out):
-- Traffic from eth1 (192.168.101.100) must exit via eth1, not eth0
-- Applied: ip rule add from 192.168.101.100 table 101
--          ip route add default via 192.168.101.1 dev eth1 table 101
-- Persistent: /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
+- Script: /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
+- IP-based: 192.168.101.100 → table 101, 192.168.102.100 → table 102
+- Works regardless of which ethX each dongle gets assigned
 
 CRITICAL TECHNICAL FACTS — XH22 DONGLE API:
 1. NOT Huawei HiLink — custom Qualcomm firmware (Mongoose 3.0)
