@@ -1,0 +1,15 @@
+#!/bin/sh
+# /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+#
+# Prevents dongle DHCP from adding default routes with low metric.
+# Without this, dongles (192.168.101.x / 192.168.102.x) add default routes
+# that override eth0 (home router), breaking external access and DuckDNS.
+#
+# Install: cp remove-dongle-defaults /etc/dhcp/dhclient-exit-hooks.d/
+#          chmod +x /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+
+case "$new_ip_address" in
+    192.168.101.*|192.168.102.*)
+        ip route del default via "$new_routers" dev "$interface" 2>/dev/null || true
+        ;;
+esac

@@ -685,7 +685,15 @@ TELEGRAM ALERTS (v1.9.0):
 - Requires: pip3 install "requests[socks]" (PySocks — without it all checks fail silently)
 - Reset state if needed: echo '{"alerted":[],"down_since":{}}' > /var/lib/xproxymgr/alert_state.json
 
-CURRENT STATUS: All working as of 2026-03-18 (v1.9.0).
+ROUTING — NAJCZĘSTSZA PRZYCZYNA AWARII:
+1. Dongle DHCP nadpisuje default route → cały ruch XB22 przez dongle zamiast eth0
+   Diagnoza: ip route show default → nie może być linii z 192.168.101.1 lub 192.168.102.1
+   Naprawa: ip route del default via 192.168.10x.1 dev ethX [metric Y]
+   Trwałe: /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults (już zainstalowane)
+2. Policy routing puste po rebootcie → xproxy-routing.service (już zainstalowane)
+3. danted "Address already in use" → fuser -k 1080/tcp; systemctl restart danted-dongle0
+
+CURRENT STATUS: All working as of 2026-03-22 (v2.0.0).
 - SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
 - SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
 - Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
@@ -818,15 +826,80 @@ Connect to UART pins on the PCB, get full U-Boot terminal, add `init=/bin/bash` 
 
 ---
 
-## Policy Routing — Known Issue & Fix
+## Routing Issues — Complete Guide
 
-**Symptom:** After reboot or replug, SOCKS5 accepts TCP connections but all traffic times out.
+Routing jest **najczęstszą przyczyną awarii** tego systemu. Są dwa osobne problemy:
 
-**Root cause:** `networkd-dispatcher` doesn't always fire for USB ethernet interfaces on boot,
-leaving routing tables 101 and 102 empty.
+---
 
-**Fix (applied 2026-03-18):** Added `xproxy-routing.service` systemd unit as a reliable fallback:
+### Problem 1 — Dongle DHCP nadpisuje default route ⚠️ NAJWAŻNIEJSZY
 
+**Objawy:**
+- Proxy działa lokalnie (`192.168.1.107:1080`) ale nie przez DuckDNS
+- `curl https://api4.ipify.org` z XB22 zwraca IP dongla (np. `1.47.x.x`) zamiast IP routera
+- DuckDNS aktualizuje się błędnym IP (dongla zamiast routera AIS)
+- AdsPower nie może się połączyć mimo że dashboard działa
+
+**Diagnoza:**
+```bash
+ssh root@192.168.1.107
+ip route show default
+# ŹLE: widać linie z via 192.168.101.1 lub 192.168.102.1 z metric < 202
+# DOBRZE: jedyna linia to: default via 192.168.1.1 dev eth0 ... metric 202
+
+curl https://api4.ipify.org
+# Powinno zwrócić IP routera AIS (np. 58.136.146.0)
+# Jeśli zwraca 1.47.x.x lub 49.237.x.x — routing jest popsuty
+```
+
+**Dlaczego się to dzieje:**
+Dongle XH22 podłączone przez USB działają jak interfejsy ethernet z własnym DHCP.
+Ten DHCP dodaje default route z niskim metric (101, 102) — niższym niż eth0 (202).
+Linux wybiera trasę o najniższym metric → cały ruch XB22 idzie przez dongle zamiast przez router domowy.
+
+**Trwałe naprawienie — dhclient hook (już zainstalowany):**
+```bash
+# Plik: /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+# Automatycznie usuwa błędne default routes przy każdym DHCP renewal
+cat /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+```
+
+Instalacja od zera (np. po reinstalacji):
+```bash
+cp remove-dongle-defaults /etc/dhcp/dhclient-exit-hooks.d/
+chmod +x /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+```
+
+**Ręczna naprawa gdy już się posypało:**
+```bash
+ssh root@192.168.1.107
+# Usuń wszystkie dongle default routes
+ip route del default via 192.168.102.1 dev eth1 2>/dev/null; true
+ip route del default via 192.168.101.1 dev eth2 2>/dev/null; true
+ip route del default via 192.168.102.1 dev eth1 metric 203 2>/dev/null; true
+ip route del default via 192.168.101.1 dev eth2 metric 204 2>/dev/null; true
+# Weryfikacja — powinna zostać tylko jedna linia z eth0
+ip route show default
+# Test — musi zwrócić IP routera AIS, nie dongla
+curl https://api4.ipify.org
+```
+
+**DuckDNS cron — zabezpieczony przez `--interface eth0`:**
+```bash
+# Cron zawsze wysyła przez eth0 (home network), nigdy przez dongle
+crontab -l | grep duckdns
+# Powinno zawierać: curl -s --interface eth0 "https://www.duckdns.org/..."
+```
+
+---
+
+### Problem 2 — Policy routing nie działa po rebootcie
+
+**Objawy:** SOCKS5 przyjmuje połączenia ale ruch przez dongle timeout-uje
+
+**Root cause:** `networkd-dispatcher` nie zawsze odpala się dla USB ethernet przy starcie
+
+**Fix (zainstalowany jako `xproxy-routing.service`):**
 ```bash
 cat > /etc/systemd/system/xproxy-routing.service << 'EOF'
 [Unit]
@@ -846,7 +919,7 @@ EOF
 systemctl daemon-reload && systemctl enable --now xproxy-routing.service
 ```
 
-Manual recovery if routing is lost:
+**Ręczna naprawa:**
 ```bash
 ssh root@192.168.1.107
 ip rule add from 192.168.101.100 table 101 2>/dev/null || true
@@ -857,7 +930,62 @@ ip route replace default via 192.168.102.1 dev eth1 table 102   # adjust ethX
 
 ---
 
+### Problem 3 — danted nie startuje (Address already in use)
+
+**Objawy:** `systemctl status danted-dongle0` → `Failed`, port 1080 zajęty
+
+**Dlaczego:** poprzedni proces danted nie został poprawnie zabity
+
+**Fix (zainstalowany — `ExecStartPre fuser -k` w unit file):**
+```bash
+# Ręczna naprawa:
+fuser -k 1080/tcp 2>/dev/null; fuser -k 1081/tcp 2>/dev/null
+systemctl restart danted-dongle0 danted-dongle1
+```
+
+---
+
+### Checklista diagnostyczna — gdy proxy nie działa
+
+```
+1. SSH na XB22:  ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
+
+2. Sprawdź default route:
+   ip route show default
+   → Musi być TYLKO: default via 192.168.1.1 dev eth0 ... metric 202
+   → Jeśli są linie z 192.168.101.1 lub 192.168.102.1 → Problem 1 (usuń je)
+
+3. Sprawdź public IP:
+   curl https://api4.ipify.org
+   → Musi zwrócić IP routera AIS (np. 58.136.146.0)
+   → Jeśli zwraca 1.47.x.x lub 49.237.x.x → Problem 1
+
+4. Sprawdź czy danted działa:
+   systemctl is-active danted-dongle0 danted-dongle1
+   ss -tlnp | grep -E '1080|1081'
+   → Oba muszą być active i nasłuchiwać
+
+5. Test lokalny SOCKS5:
+   python3 -c "import requests; print(requests.get('https://api4.ipify.org', timeout=10, proxies={'https':'socks5h://127.0.0.1:1080'}).text)"
+   → Musi zwrócić IP True dongla
+
+6. Test zewnętrzny:
+   curl --proxy socks5h://havanawin.duckdns.org:1080 https://api4.ipify.org
+   → Musi zwrócić IP True dongla
+   → Jeśli lokalny (krok 5) działa a zewnętrzny nie → Problem z DuckDNS lub port forwarding
+```
+
+---
+
 ## Version History
+
+### v2.0.0 — Routing fixes permanent + danted reliability
+
+- **Fixed** dongle DHCP overriding default route: added `dhclient-exit-hooks.d/remove-dongle-defaults` — automatically removes default routes added by dongle DHCP on every renewal. Root cause of most "proxy not working" incidents
+- **Fixed** DuckDNS cron: added `--interface eth0` — always sends router's public IP, never dongle IP
+- **Fixed** danted systemd: switched from `Type=forking` + PID file to `Type=simple` + `-N 1` (no-fork) + `ExecStartPre fuser -k` — eliminates "Address already in use" restart loops
+- **Added** `remove-dongle-defaults` hook file to repo
+- **Added** complete routing troubleshooting guide to README with 3 problems, symptoms, causes and checklists
 
 ### v1.9.0 — Telegram proxy alerts + persistent alert state
 
