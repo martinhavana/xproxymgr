@@ -1,0 +1,16 @@
+#!/bin/bash
+# /usr/local/bin/fix-routes
+# Removes spurious default routes added by dongle DHCP (192.168.101.1 / 192.168.102.1)
+# Runs every minute via cron: * * * * * /usr/local/bin/fix-routes
+#
+# Install:
+#   cp fix-routes /usr/local/bin/fix-routes && chmod +x /usr/local/bin/fix-routes
+#   (crontab -l; echo '* * * * * /usr/local/bin/fix-routes') | crontab -
+
+for gw in 192.168.101.1 192.168.102.1; do
+    while ip route show default | grep -q "via $gw"; do
+        metric=$(ip route show default | grep "via $gw" | grep -oP 'metric \K[0-9]+' | head -1)
+        dev=$(ip route show default | grep "via $gw" | grep -oP 'dev \K\S+' | head -1)
+        ip route del default via $gw dev $dev metric $metric 2>/dev/null || break
+    done
+done

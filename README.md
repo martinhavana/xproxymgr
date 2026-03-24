@@ -857,18 +857,21 @@ Dongle XH22 podłączone przez USB działają jak interfejsy ethernet z własnym
 Ten DHCP dodaje default route z niskim metric (101, 102) — niższym niż eth0 (202).
 Linux wybiera trasę o najniższym metric → cały ruch XB22 idzie przez dongle zamiast przez router domowy.
 
-**Trwałe naprawienie — dhclient hook (już zainstalowany):**
+**Trwałe naprawienie — cron co minutę (już zainstalowany):**
 ```bash
-# Plik: /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
-# Automatycznie usuwa błędne default routes przy każdym DHCP renewal
-cat /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+# Weryfikacja że cron działa:
+crontab -l | grep fix-routes
+# Powinno zwrócić: * * * * * /usr/local/bin/fix-routes
 ```
 
 Instalacja od zera (np. po reinstalacji):
 ```bash
-cp remove-dongle-defaults /etc/dhcp/dhclient-exit-hooks.d/
-chmod +x /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+cp fix-routes /usr/local/bin/fix-routes
+chmod +x /usr/local/bin/fix-routes
+(crontab -l; echo '* * * * * /usr/local/bin/fix-routes') | crontab -
 ```
+
+> **Uwaga:** `dhclient-exit-hooks` NIE jest niezawodne — hook nie odpala się przy wszystkich sytuacjach (boot z cached lease, replug, itp.). **Cron co minutę jest jedynym pewnym rozwiązaniem.**
 
 **Ręczna naprawa gdy już się posypało:**
 ```bash
