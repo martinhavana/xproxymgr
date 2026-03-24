@@ -1,0 +1,9 @@
+[Unit]
+Description=Fix dongle default routes and policy routing
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/fix-routes
+ExecStartPost=/etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
+TimeoutSec=15
