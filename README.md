@@ -1077,3 +1077,5 @@ systemctl restart danted-dongle0 danted-dongle1
 ---
 
 *Built with Claude Code — session history available at https://github.com/martinhavana/xproxymgr*
+
+> **Uwaga (2026-03-23):** `supersede routers 0.0.0.0` w dhclient.conf może powodować że policy routing tables (101/102) nie uzupełniają się po DHCP renewal. Dlatego cron co minutę uruchamia BOTH: `fix-routes` i skrypt policy routingu.
