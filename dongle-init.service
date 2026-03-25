@@ -1,0 +1,12 @@
+[Unit]
+Description=Dongle interface reinit + routing fix
+After=network.target xproxy-routing.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/dongle-init.sh
+
+[Install]
+WantedBy=multi-user.target
