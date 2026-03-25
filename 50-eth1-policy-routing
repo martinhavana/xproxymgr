@@ -1,0 +1,38 @@
+#!/bin/bash
+
+setup_dongle_routing() {
+    local iface=$1
+    local ip=$(ip -4 addr show "$iface" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1)
+    [ -z "$ip" ] && return
+
+    case "$ip" in
+        192.168.101.*)
+            ip rule add from 192.168.101.100 table 101 2>/dev/null || true
+            ip route replace default via 192.168.101.1 dev "$iface" table 101
+            ip route del default via 192.168.101.1 dev "$iface" 2>/dev/null || true
+            ;;
+        192.168.102.*)
+            ip rule add from 192.168.102.100 table 102 2>/dev/null || true
+            ip route replace default via 192.168.102.1 dev "$iface" table 102
+            ip route del default via 192.168.102.1 dev "$iface" 2>/dev/null || true
+            ;;
+        192.168.103.*)
+            ip rule add from 192.168.103.100 table 103 2>/dev/null || true
+            ip route replace default via 192.168.103.1 dev "$iface" table 103
+            ip route del default via 192.168.103.1 dev "$iface" 2>/dev/null || true
+            ;;
+    esac
+}
+
+# Usuń WSZYSTKIE dongle default routes ze main table (failsafe)
+for gw in 192.168.101.1 192.168.102.1 192.168.103.1; do
+    while ip route del default via $gw 2>/dev/null; do true; done
+done
+
+if [ -n "$IFACE" ]; then
+    setup_dongle_routing "$IFACE"
+else
+    for iface in $(ls /sys/class/net/ | grep '^eth'); do
+        setup_dongle_routing "$iface"
+    done
+fi

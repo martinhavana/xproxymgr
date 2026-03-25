@@ -693,7 +693,9 @@ ROUTING — NAJCZĘSTSZA PRZYCZYNA AWARII:
 2. Policy routing puste po rebootcie → xproxy-routing.service (już zainstalowane)
 3. danted "Address already in use" → fuser -k 1080/tcp; systemctl restart danted-dongle0
 
-CURRENT STATUS: All working as of 2026-03-22 (v2.0.0).
+CURRENT STATUS: All working as of 2026-03-25 (v2.1.0).
+- True dongle: NOWA podsieć 192.168.103.x (stara 192.168.101.x nieużywana)
+- DTAC dongle: 192.168.102.x (bez zmian)
 - SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
 - SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
 - Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
@@ -981,6 +983,16 @@ systemctl restart danted-dongle0 danted-dongle1
 ---
 
 ## Version History
+
+### v2.1.0 — True dongle overheating fix + new subnet + CLOSE-WAIT auto-restart
+
+- **Root cause found:** True dongle (XH22) overheating → USB resets → proxy "down" every 4-17 min. Fix: replace dongle + change USB port + ensure ventilation
+- **New dongle subnet:** True dongle now on `192.168.103.x` (was `192.168.101.x`) — updated danted config, routing tables, dhclient hook, routing script
+- **Fixed CLOSE-WAIT socket leak:** 4000+ CLOSE-WAIT connections on port 1080 caused danted to crash under load. Added `danted-health.sh` cron (every 5 min) — auto-restarts danted-dongle0 when CLOSE-WAIT > 2000
+- **Hardened routing script:** `50-eth1-policy-routing` now also removes dongle default routes from main table as failsafe — covers subnets 101/102/103. Runs `while ip route del` loop to catch multiple entries
+- **TCP tuning via sysctl:** `tcp_fin_timeout=15`, `tcp_tw_reuse=1`, keepalive 60/10/3 — sockets clear faster, reduces CLOSE-WAIT buildup
+- **fail2ban whitelist:** `192.168.1.0/24` added to `ignoreip` in `jail.local` — SSH diagnostics can never lock out LAN again
+- **Added monitoring cron:** `monitor-true.sh` logs True interface state every minute to `/var/log/true-monitor.log`
 
 ### v2.0.0 — Routing fixes permanent + danted reliability
 
