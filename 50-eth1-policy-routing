@@ -17,6 +17,7 @@ setup_dongle_routing() {
             ip route del default via 192.168.102.1 dev "$iface" 2>/dev/null || true
             ;;
         192.168.103.*)
+            ip link set "$iface" mtu 1280 2>/dev/null || true
             ip rule add from 192.168.103.100 table 103 2>/dev/null || true
             ip route replace default via 192.168.103.1 dev "$iface" table 103
             ip route del default via 192.168.103.1 dev "$iface" 2>/dev/null || true
