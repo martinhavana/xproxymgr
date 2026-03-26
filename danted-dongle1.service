@@ -1,13 +1,13 @@
 [Unit]
 Description=SOCKS5 proxy - Dongle 1 (DTAC) port 1081
-After=network.target
+After=network.target dongle-init.service
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sh -c 'fuser -k 1081/tcp 2>/dev/null; sleep 1; true'
+ExecStartPre=/bin/sh -c 'fuser -k 1081/tcp 2>/dev/null; sleep 2; true'
 ExecStart=/usr/sbin/danted -N 1 -f /etc/danted-dongle1.conf
 Restart=on-failure
-RestartSec=5
+RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
