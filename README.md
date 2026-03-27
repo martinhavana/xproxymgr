@@ -5,6 +5,145 @@
 
 ---
 
+## Version History
+
+| Version | Date | Summary |
+|---------|------|---------|
+| **v2.2.0** | 2026-03-27 | **CRITICAL FIX: IP whitelist firewall.** Ports 1080/1081 now restricted to home IP only (iptables). Auto-updates via DuckDNS cron. Eliminated all external bot traffic. |
+| **v2.1.0** | 2026-03-25 | **CRITICAL FIX: CLOSE-WAIT / RAM exhaustion.** Added `child.maxrequests: 200`, `timeout.connect: 30`, `timeout.io: 3600` to danted. Root cause identified: bots flooding open SOCKS5 ports. |
+| **v2.0.0** | 2026-03-22 | True dongle replaced — new subnet 192.168.103.x (old: 192.168.101.x). Updated danted, routing, config.py. Removed unstable dongle-init.service and danted-health.sh. |
+| **v1.9.0** | 2026-03-20 | Telegram alerts with persistent state (alert_state.json). Grace period 2→4 min. PySocks fix. |
+| **v1.8.0** | 2026-03-19 | DuckDNS auto-update cron on XB22 (every 5 min via eth0). |
+| **v1.7.0** | 2026-03-18 | fail2ban ignoreip for 192.168.1.0/24 (SSH lockout fix). |
+| **v1.6.0** | 2026-03-17 | dhclient-exit-hooks to prevent dongle DHCP overriding default route. MTU 1280 for True dongle. |
+| **v1.5.0** | 2026-03-16 | Two-dongle support: danted-dongle0 (1080) + danted-dongle1 (1081). Policy routing tables 101, 102. |
+| **v1.0.0** | 2026-03-10 | Initial setup: single XH22, danted SOCKS5, xproxymgr Flask dashboard, IP rotation via file=router. |
+
+---
+
+## Root Cause of System Crashes — CLOSE-WAIT / RAM Exhaustion
+
+> **This was the #1 problem.** System crashed every 5–15 minutes. Documented here so it never happens again.
+
+### What was happening
+
+```
+Internet → Router (port forward 1080/1081) → XB22 danted
+                                                   ↑
+                            SOCKS5 ports open to entire internet, NO authentication
+                            Automated bots and port scanners connect constantly
+```
+
+**Timeline of a crash:**
+1. System starts — 500 MB RAM used
+2. Bots connect to port 1080 en masse (probing, scanning, trying to use proxy)
+3. Each connection leaves a `CLOSE-WAIT` socket when bot disconnects (danted child process doesn't release it)
+4. After 30–45 minutes: 4,000+ CLOSE-WAIT sockets, each using ~1–2 KB kernel memory
+5. 3 GB RAM exhausted (no swap configured) → OOM killer fires → danted killed → proxy down
+6. After restart → cycle repeats in minutes
+
+**Evidence:**
+```bash
+ss -s
+# TCP: 4127 (estab 200, closed 3900, orphaned 3800, timewait 12)
+# ← 3,900 CLOSE-WAIT sockets eating all RAM
+
+free -m
+# Mem: 2988 / used: 2940 / free: 40
+# ← 40 MB left → crash imminent
+```
+
+### Fixes applied (v2.1.0 + v2.2.0)
+
+**Fix 1 — danted child recycling** (buys time, not a full solution):
+```
+child.maxrequests: 200     # Force-recycle child processes after 200 requests
+timeout.connect: 30        # Kill if no connection established in 30s
+timeout.io: 3600           # Kill idle connections after 1 hour
+```
+
+**Fix 2 — IP whitelist firewall (permanent solution):**
+```bash
+# Only your home IP + LAN can connect — everything else dropped at kernel level
+# Bots never reach danted → zero CLOSE-WAIT from bots → RAM stays stable
+```
+
+**Current state after Fix 2:**
+```
+CLOSE-WAIT: 62      (was: 4000+)
+RAM used:   780 MB  (was: 2940 MB before crash)
+Blocked:    613,000 bot connection attempts in 45 minutes (port 1080 alone)
+```
+
+---
+
+## Security — IP Whitelist Firewall (v2.2.0)
+
+> **Critical.** Without this, bots crash the system within minutes of restart.
+
+### Current iptables rules
+
+```
+Chain INPUT (policy ACCEPT)
+1    ACCEPT  tcp  127.0.0.1            dpt:1080
+2    ACCEPT  tcp  127.0.0.1            dpt:1081
+3    ACCEPT  tcp  192.168.1.0/24       dpt:1080   ← home WiFi/LAN
+4    ACCEPT  tcp  192.168.1.0/24       dpt:1081   ← home WiFi/LAN
+5    ACCEPT  tcp  58.136.146.0/32      dpt:1080   ← home public IP (auto-updated)
+6    ACCEPT  tcp  58.136.146.0/32      dpt:1081   ← home public IP (auto-updated)
+7    DROP    tcp  0.0.0.0/0            dpt:1080   ← rest of internet blocked
+8    DROP    tcp  0.0.0.0/0            dpt:1081   ← rest of internet blocked
+```
+
+### How it's set up
+
+```bash
+# Remove old rules
+iptables -F INPUT
+
+# Allow localhost
+iptables -A INPUT -p tcp --dport 1080 -s 127.0.0.1 -j ACCEPT
+iptables -A INPUT -p tcp --dport 1081 -s 127.0.0.1 -j ACCEPT
+
+# Allow home LAN
+iptables -A INPUT -p tcp --dport 1080 -s 192.168.1.0/24 -j ACCEPT
+iptables -A INPUT -p tcp --dport 1081 -s 192.168.1.0/24 -j ACCEPT
+
+# Allow home public IP (resolved from DuckDNS)
+MYIP=$(dig +short havanawin.duckdns.org | head -1)
+iptables -A INPUT -p tcp --dport 1080 -s $MYIP -j ACCEPT
+iptables -A INPUT -p tcp --dport 1081 -s $MYIP -j ACCEPT
+
+# Block everyone else
+iptables -A INPUT -p tcp --dport 1080 -j DROP
+iptables -A INPUT -p tcp --dport 1081 -j DROP
+
+# Save permanently
+iptables-save > /etc/iptables/rules.v4
+```
+
+### Auto-update when home IP changes
+
+Cron (every minute) resolves `havanawin.duckdns.org` and updates iptables if IP changed:
+
+```bash
+# /usr/local/bin/update-proxy-whitelist.sh
+NEW_IP=$(dig +short havanawin.duckdns.org | head -1)
+CURRENT=$(iptables -L INPUT -n | grep 'dpt:1080' | grep ACCEPT | grep -v '192.168.1.0' | grep -v '127.0.0.1' | awk '{print $4}' | head -1)
+
+if [ "$CURRENT" != "$NEW_IP" ]; then
+    iptables -D INPUT -p tcp --dport 1080 -s "$CURRENT" -j ACCEPT
+    iptables -D INPUT -p tcp --dport 1081 -s "$CURRENT" -j ACCEPT
+    iptables -I INPUT 3 -p tcp --dport 1080 -s "$NEW_IP" -j ACCEPT
+    iptables -I INPUT 4 -p tcp --dport 1081 -s "$NEW_IP" -j ACCEPT
+    iptables-save > /etc/iptables/rules.v4
+fi
+```
+
+DuckDNS updates (ISP IP change) → whitelist script auto-updates → no manual intervention needed.
+
+---
+
 ## Hardware
 
 | Device | Role |
@@ -12,23 +151,25 @@
 | **XProxy XB22** | ARM64 mini server (Ubuntu 20.04, aarch64) |
 | **XProxy XH22** | 4G LTE USB dongle (custom Qualcomm firmware) |
 
-- XB22 IP on LAN: `192.168.1.107` (eth0)
+- XB22 IP on LAN: `192.168.1.107` (eth0), MAC: `02:03:76:f0:1b:bb`
 - XH22 appears as `eth1` / `eth2` etc. on XB22 (RNDIS/HiLink ethernet mode)
-- Each dongle gets its own subnet: dongle 1 → `192.168.101.x`, dongle 2 → `192.168.102.x`
-- XH22 web panel: `http://192.168.101.1` (Mongoose 3.0, Digest auth `admin/admin`)
-- XB22 SSH: port 22, Ubuntu OpenSSH 8.2p1
+- Dongle subnets: True → `192.168.103.x`, DTAC → `192.168.102.x`
+- XH22 web panel: `http://192.168.103.1` (True) / `http://192.168.102.1` (DTAC)
+- XB22 SSH: `ssh -i ~/.ssh/id_ed25519 root@192.168.1.107`
 
 ---
 
 ## What This System Does
 
-1. **SOCKS5 proxy** on port 1080 (dongle 0, True) and port 1081 (dongle 1, DTAC) via `dante-server` (danted)
-2. **IP rotation** via XH22 native API — new IP in ~5 seconds, **every time**
+1. **SOCKS5 proxy** on port 1080 (True) and port 1081 (DTAC) via `dante-server` (danted)
+2. **IP rotation** via XH22 native API — new IP in ~5 seconds, every time
 3. **Web dashboard** at `http://192.168.1.107:8080` — per-dongle cards with IP, signal, status, rotate button
 4. **REST API** at port 8080 — `/api/status`, `/api/rotate/<idx>`, `/api/dongles`, etc.
 5. **Background monitor** — polls dongle + proxy status every 15s
 6. **Multi-dongle support** — each XH22 managed independently, auto-detected
 7. **External access** — AIS Fibre port forwarding + DuckDNS (`havanawin.duckdns.org`)
+8. **Telegram alerts** — notifies on proxy down (4 min grace) and recovery
+9. **IP whitelist firewall** — only home IP allowed on proxy ports, blocks all bots
 
 ---
 
@@ -139,12 +280,13 @@ regardless of the actual endpoint URL.
 | Service | Address |
 |---------|---------|
 | SSH | `ssh -i ~/.ssh/id_ed25519 root@192.168.1.107` |
-| SOCKS5 | `192.168.1.107:1080` |
+| SOCKS5 dongle 0 (True) | `192.168.1.107:1080` |
+| SOCKS5 dongle 1 (DTAC) | `192.168.1.107:1081` |
 | Dashboard | `http://192.168.1.107:8080` |
 
-### Any network — DuckDNS + Port Forwarding 🌍
+### Any network — DuckDNS + Port Forwarding
 
-Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
+Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP, auto-updated)
 
 | Service | Address |
 |---------|---------|
@@ -153,6 +295,9 @@ Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 | Dashboard | `http://havanawin.duckdns.org:8080` |
 | Rotate dongle 0 (True) | `http://havanawin.duckdns.org:8080/api/rotate/0` |
 | Rotate dongle 1 (DTAC) | `http://havanawin.duckdns.org:8080/api/rotate/1` |
+
+> ⚠️ Port 1080/1081 are whitelisted — only your home public IP can connect from outside.
+> From a different network (hotel, mobile), you need to update the whitelist manually or temporarily.
 
 **Router: AIS Fibre F6107A** — Port Forwarding rules (Internet → Security → Port Forwarding):
 
@@ -180,42 +325,46 @@ Domain: **`havanawin.duckdns.org`** → `58.136.146.0` (AIS Fibre public IP)
 
 ## Policy Routing (Critical for SOCKS5 to Work)
 
-Without policy routing, danted receives SOCKS5 connections but **outgoing traffic via dongle interfaces times out** because the default route uses eth0 (lower metric), causing asymmetric routing — replies can't return via the dongle interface.
+Without policy routing, danted receives SOCKS5 connections but **outgoing traffic via dongle interfaces times out** because the default route uses eth0, causing asymmetric routing.
 
-> **Two dongles:** interface names (eth1/eth2) can **swap** on reboot or replug. The routing script uses IP-based detection, not interface names — so it always works correctly regardless of which ethX each dongle gets.
+> **Interface names (eth1/eth2) can swap on reboot or replug.** The routing script uses IP-based detection — always works regardless of which ethX each dongle gets.
 
 ### Fix Applied (both dongles)
 
 ```bash
-# Dongle 0 (192.168.101.x) — whichever ethX it's on
-ip rule add from 192.168.101.100 table 101
-ip route add default via 192.168.101.1 dev <ethX> table 101
+# True dongle (192.168.103.x) — whichever ethX it's on
+ip rule add from 192.168.103.100 table 103
+ip route add default via 192.168.103.1 dev <ethX> table 103
 
-# Dongle 1 (192.168.102.x) — whichever ethX it's on
+# DTAC dongle (192.168.102.x) — whichever ethX it's on
 ip rule add from 192.168.102.100 table 102
 ip route add default via 192.168.102.1 dev <ethX> table 102
 ```
 
-### Persistent Script (IP-based, interface-agnostic)
+### Persistent Script — `/etc/networkd-dispatcher/routable.d/50-eth1-policy-routing`
 
 ```bash
-cat > /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing << 'EOF'
 #!/bin/bash
 setup_dongle_routing() {
     local iface=$1
     local ip=$(ip -4 addr show "$iface" | grep 'inet ' | awk '{print $2}' | cut -d/ -f1 | head -1)
     [ -z "$ip" ] && return
     case "$ip" in
-        192.168.101.*)
-            ip rule add from 192.168.101.100 table 101 2>/dev/null || true
-            ip route replace default via 192.168.101.1 dev "$iface" table 101
-            ;;
         192.168.102.*)
             ip rule add from 192.168.102.100 table 102 2>/dev/null || true
             ip route replace default via 192.168.102.1 dev "$iface" table 102
             ;;
+        192.168.103.*)
+            ip rule add from 192.168.103.100 table 103 2>/dev/null || true
+            ip route replace default via 192.168.103.1 dev "$iface" table 103
+            # MTU 1280 required for True dongle (HTTPS fails otherwise)
+            ip link set dev "$iface" mtu 1280
+            ;;
     esac
+    # Never let dongle DHCP override default route
+    ip route del default via "${ip%.*}.1" dev "$iface" 2>/dev/null || true
 }
+
 if [ -n "$IFACE" ]; then
     setup_dongle_routing "$IFACE"
 else
@@ -223,21 +372,38 @@ else
         setup_dongle_routing "$iface"
     done
 fi
-EOF
-chmod +x /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
 ```
+
+### DHCP Hook — `/etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults`
+
+Prevents dongle DHCP from adding a default route to the main routing table:
+
+```bash
+#!/bin/bash
+case "$new_ip_address" in
+    192.168.101.*|192.168.102.*|192.168.103.*)
+        ip route del default via "$new_routers" dev "$interface" 2>/dev/null || true
+        ;;
+esac
+```
+
+> If dongle default routes appear in `ip route show default`, SOCKS5 breaks and DuckDNS updates
+> with the dongle's carrier IP instead of your home router IP.
 
 ---
 
 ## danted Configuration (Two Dongles)
 
-Two separate danted instances, each bound to a specific dongle subnet IP (not interface name — avoids eth1/eth2 swap issues).
+Two separate danted instances, each bound to a specific dongle subnet IP (not interface name).
 
 **`/etc/danted-dongle0.conf`** (True, port 1080):
 ```
 logoutput: syslog
+timeout.connect: 30
+timeout.io: 3600
+child.maxrequests: 200
 internal: 0.0.0.0 port = 1080
-external: 192.168.101.100
+external: 192.168.103.100
 clientmethod: none
 socksmethod: none
 user.privileged: root
@@ -249,6 +415,9 @@ socks pass { from: 0.0.0.0/0 to: 0.0.0.0/0; socksmethod: none; log: connect disc
 **`/etc/danted-dongle1.conf`** (DTAC, port 1081):
 ```
 logoutput: syslog
+timeout.connect: 30
+timeout.io: 3600
+child.maxrequests: 200
 internal: 0.0.0.0 port = 1081
 external: 192.168.102.100
 clientmethod: none
@@ -259,38 +428,38 @@ client pass { from: 0.0.0.0/0 to: 0.0.0.0/0; log: connect disconnect error }
 socks pass { from: 0.0.0.0/0 to: 0.0.0.0/0; socksmethod: none; log: connect disconnect error }
 ```
 
-**`/usr/local/bin/danted-wrapper`** (keeps foreground process alive for systemd `Type=simple`):
-```bash
-#!/bin/bash
-CONFIG=$1
-PORT=$2
-/usr/sbin/danted -f "$CONFIG"
-sleep 2
-while ss -tlnp | grep -q ":$PORT "; do
-    sleep 5
-done
-exit 1
-```
-
 **`/etc/systemd/system/danted-dongle0.service`** (same pattern for dongle1):
 ```ini
 [Unit]
-Description=SOCKS5 proxy - Dongle 0 port 1080
+Description=SOCKS5 proxy - Dongle 0 (True) port 1080
 After=network.target
+
 [Service]
 Type=simple
-ExecStart=/usr/local/bin/danted-wrapper /etc/danted-dongle0.conf 1080
-Restart=always
-RestartSec=5
+ExecStartPre=/bin/sh -c 'fuser -k 1080/tcp || true'
+ExecStartPre=/bin/sleep 2
+ExecStart=/usr/sbin/danted -N 1 -f /etc/danted-dongle0.conf
+Restart=on-failure
+RestartSec=10
+
 [Install]
 WantedBy=multi-user.target
 ```
 
+**Key danted options explained:**
+
+| Option | Value | Why |
+|--------|-------|-----|
+| `timeout.connect` | `30` | Kill if no connection established in 30s — blocks slow bots |
+| `timeout.io` | `3600` | Kill idle connections after 1 hour — releases CLOSE-WAIT |
+| `child.maxrequests` | `200` | Force-recycle child process after 200 requests — prevents memory leak buildup |
+| `external` | IP address | NOT interface name — avoids eth1/eth2 swap problem on reboot |
+| `logoutput` | `syslog` | NOT a file path — read-only filesystem at boot causes crash |
+| `socksmethod` | `none` | NOT `username none` — the `username` keyword breaks auth-free setup |
+
 **Gotchas:**
-- `logoutput: syslog` — NOT `/var/log/danted.log` (read-only filesystem at startup causes daemon crash)
-- `socksmethod: none` — NOT `socksmethod: username none` (the `username` keyword breaks auth-free setup)
-- `external: 192.168.101.100` (IP, not interface name) — avoids eth1/eth2 swap problem on reboot/replug
-- systemd `Type=simple` with wrapper script — danted daemonizes (parent exits), causing `Type=forking` PIDFile timeout
+- `Type=simple` with `-N 1` — danted normally daemonizes (parent exits), causing `Type=forking` PIDFile timeout
+- `ExecStartPre` clears port before start — prevents "Address already in use" errors
 
 ---
 
@@ -319,62 +488,16 @@ ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "cd /opt/xproxymgr && bash install.s
 ### What the Installer Does
 
 ```bash
-apt-get install -y python3-pip dante-server
-pip3 install flask requests
+apt-get install -y python3-pip dante-server iptables-persistent
+pip3 install flask requests "requests[socks]"
 
-# dante SOCKS5 config
-cat > /etc/danted.conf << 'EOF'
-logoutput: syslog
-internal: 0.0.0.0 port = 1080
-external: eth1
-clientmethod: none
-socksmethod: none
-user.privileged: root
-user.notprivileged: nobody
-
-client pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    log: connect disconnect error
-}
-
-socks pass {
-    from: 0.0.0.0/0 to: 0.0.0.0/0
-    socksmethod: none
-    log: connect disconnect error
-}
-EOF
-
-# Policy routing (required for SOCKS5 to work through dongle)
-ip rule add from 192.168.101.100 table 101 2>/dev/null || true
-ip route add default via 192.168.101.1 dev eth1 table 101 2>/dev/null || true
-
-cat > /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing << 'RTEOF'
-#!/bin/sh
-if [ "$IFACE" = "eth1" ]; then
-    ip rule add from 192.168.101.100 table 101 2>/dev/null || true
-    ip route add default via 192.168.101.1 dev eth1 table 101 2>/dev/null || true
-fi
-RTEOF
-chmod +x /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
-
-# systemd service
-cat > /etc/systemd/system/xproxymgr.service << 'EOF'
-[Unit]
-Description=XProxy Manager
-After=network.target
-[Service]
-User=root
-WorkingDirectory=/opt/xproxymgr
-Environment=DONGLE_HOST=192.168.101.1
-Environment=WEB_PORT=8080
-ExecStart=/usr/bin/python3 /opt/xproxymgr/app.py
-Restart=always
-[Install]
-WantedBy=multi-user.target
-EOF
-
-systemctl daemon-reload
-systemctl enable --now danted xproxymgr
+# danted configs (dongle0 + dongle1)
+# systemd services
+# policy routing script
+# dhclient-exit-hooks
+# iptables whitelist
+# DuckDNS cron (every 5 min)
+# whitelist auto-update cron (every 1 min)
 ```
 
 ---
@@ -401,54 +524,26 @@ Base URL: `http://192.168.1.107:8080` or `http://havanawin.duckdns.org:8080`
 ### `GET /api/rotate` or `POST /api/rotate`
 Rotate IP for dongle 0 (default). Both GET and POST supported.
 ```bash
-# GET — for browser, AdsPower, or any simple HTTP client:
 curl http://192.168.1.107:8080/api/rotate
-curl "http://192.168.1.107:8080/api/rotate?dongle=1"   # specific dongle
-
-# POST — for API clients:
-curl -X POST http://192.168.1.107:8080/api/rotate
-curl -X POST http://192.168.1.107:8080/api/rotate -d '{"dongle":1}'
-
+curl "http://192.168.1.107:8080/api/rotate?dongle=1"
 # {"success": true, "new_ip": "49.237.6.170", "old_ip": "49.237.39.218"}
 ```
 
-### `GET /api/rotate/<index>` or `POST /api/rotate/<index>` (dongle by index)
+### `GET /api/rotate/<index>` (by dongle index)
 ```bash
-# AdsPower rotation URL format (GET):
-http://havanawin.duckdns.org:8080/api/rotate/0   # dongle 0
-http://havanawin.duckdns.org:8080/api/rotate/1   # dongle 1
+# AdsPower rotation URL format:
+http://havanawin.duckdns.org:8080/api/rotate/0   # dongle 0 (True)
+http://havanawin.duckdns.org:8080/api/rotate/1   # dongle 1 (DTAC)
 ```
 
 ### `GET /api/dongles`
 ```json
 {
   "dongles": [
-    {
-      "index": 0,
-      "host": "192.168.101.1",
-      "interface": "eth1",
-      "status": "connected",
-      "ip": "49.237.39.218"
-    },
-    {
-      "index": 1,
-      "host": "192.168.102.1",
-      "interface": "eth2",
-      "status": "connected",
-      "ip": "49.237.11.5"
-    }
+    {"index": 0, "host": "192.168.103.1", "interface": "eth1", "status": "connected", "ip": "49.237.39.218"},
+    {"index": 1, "host": "192.168.102.1", "interface": "eth2", "status": "connected", "ip": "49.237.11.5"}
   ]
 }
-```
-
-### `POST /api/proxy/start`
-```bash
-curl -X POST http://192.168.1.107:8080/api/proxy/start -H "Content-Type: application/json" -d '{"port": 1080}'
-```
-
-### `POST /api/proxy/stop`
-```bash
-curl -X POST http://192.168.1.107:8080/api/proxy/stop
 ```
 
 ### `GET /api/logs`
@@ -461,25 +556,10 @@ Returns last 200 log lines as JSON array.
 In AdsPower proxy settings, enter:
 - **Proxy type:** SOCKS5
 - **Host:** `havanawin.duckdns.org`
-- **Port:** `1080`
+- **Port:** `1080` (True) or `1081` (DTAC)
 - **Rotation URL:** `http://havanawin.duckdns.org:8080/api/rotate/0`
 
 AdsPower sends a GET request to the rotation URL before each browser session opens.
-The GET endpoint returns `{"success": true, "new_ip": "...", "old_ip": "..."}`.
-
----
-
-## File Structure
-
-```
-xproxymgr/
-├── app.py           # Flask app + REST API + background monitor thread
-├── hilink.py        # XH22Client: Digest auth, IP rotation via file=router
-├── proxy_manager.py # danted lifecycle: start/stop/is_running via systemctl
-├── config.py        # All settings with env-var overrides
-├── install.sh       # One-shot installer for Ubuntu ARM64
-└── README.md        # This file
-```
 
 ---
 
@@ -490,32 +570,46 @@ xproxymgr monitors both SOCKS5 proxies and sends Telegram notifications when a d
 ### How It Works
 
 - Every **30 seconds** the watchdog tests `:1080` (True) and `:1081` (DTAC) by routing a real HTTP request through each proxy to `api4.ipify.org`
-- If a proxy fails for **2 minutes** → alert sent: `🔴 Dongle-True (:1080) — proxy nie działa!`
+- If a proxy fails for **4 minutes** → alert sent: `🔴 Dongle-True (:1080) — proxy nie działa!`
 - When it recovers → recovery sent: `✅ Dongle-True (:1080) — proxy wróciło! IP: x.x.x.x, Czas awarii: X min`
-- Alert state is **persisted to disk** (`/var/lib/xproxymgr/alert_state.json`) — survives service restarts, recovery messages are always sent correctly
+- Alert state is **persisted to disk** (`/var/lib/xproxymgr/alert_state.json`) — survives service restarts
 
 ### Requirements
 
-The `requests[socks]` package must be installed (PySocks dependency):
-
 ```bash
 pip3 install "requests[socks]"
+# Without PySocks, all SOCKS5 checks fail with "Missing dependencies for SOCKS support"
+# Proxies will always appear "down" even when working fine
 ```
-
-> ⚠️ Without this, all SOCKS5 checks fail with `Missing dependencies for SOCKS support` and proxies always appear down.
 
 ### Manually Reset Alert State
 
-If the state file gets out of sync (e.g. after manual intervention):
-
 ```bash
-# Force both as "alerted" → watchdog sends recovery on next successful check
-echo '{"alerted": ["Dongle-True (:1080)", "Dongle-DTAC (:1081)"], "down_since": {"Dongle-True (:1080)": null, "Dongle-DTAC (:1081)": null}}' \
-  > /var/lib/xproxymgr/alert_state.json && systemctl restart xproxymgr
-
 # Clear all state → fresh start (new alerts after grace period)
 echo '{"alerted": [], "down_since": {}}' \
   > /var/lib/xproxymgr/alert_state.json && systemctl restart xproxymgr
+```
+
+---
+
+## File Structure
+
+```
+xproxymgr/
+├── app.py                          # Flask app + REST API + background monitor thread
+├── hilink.py                       # XH22Client: Digest auth, IP rotation via file=router
+├── proxy_manager.py                # danted lifecycle: start/stop/is_running via systemctl
+├── config.py                       # All settings (DONGLE_HOSTS, TG_TOKEN, etc.)
+├── install.sh                      # One-shot installer for Ubuntu ARM64
+├── danted-dongle0.conf             # danted config: True, port 1080, external 192.168.103.100
+├── danted-dongle1.conf             # danted config: DTAC, port 1081, external 192.168.102.100
+├── danted-dongle0.service          # systemd service for danted-dongle0
+├── danted-dongle1.service          # systemd service for danted-dongle1
+├── 50-eth1-policy-routing          # networkd-dispatcher: policy routing + MTU 1280 for True
+├── remove-dongle-defaults          # dhclient hook: prevents dongle DHCP overriding default route
+├── jail.local                      # fail2ban: ignoreip for 192.168.1.0/24
+├── rules.v4                        # iptables whitelist (saved, loaded on boot)
+└── README.md                       # This file
 ```
 
 ---
@@ -524,34 +618,16 @@ echo '{"alerted": [], "down_since": {}}' \
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DONGLE_HOST` | `192.168.101.1` | XH22 panel IP (dongle 1) |
-| `DONGLE_HOSTS` | `192.168.101.1,192.168.102.1,...` | Comma-separated for multi-dongle |
-| `PROXY_PORT` | `1080` | SOCKS5 port |
+| `DONGLE_HOSTS` | `192.168.103.1,192.168.102.1` | Comma-separated dongle panel IPs |
+| `PROXY_PORT` | `1080` | SOCKS5 port (dongle 0) |
 | `WEB_PORT` | `8080` | Dashboard port |
-| `PROXY_USER` | `proxy` | SOCKS5 username (if auth enabled) |
-| `PROXY_PASS` | `changeme` | SOCKS5 password |
 | `ROTATE_WAIT_TIMEOUT` | `60` | Max seconds to wait for new IP |
 | `MONITOR_INTERVAL` | `15` | Background poll interval (seconds) |
-| `TG_TOKEN` | *(hardcoded in config.py)* | Telegram bot token |
-| `TG_CHAT_ID` | *(hardcoded in config.py)* | Telegram chat/user ID |
-| `PROXY_DOWN_GRACE` | `120` | Seconds before sending down alert |
+| `TG_TOKEN` | *(in config.py)* | Telegram bot token |
+| `TG_CHAT_ID` | *(in config.py)* | Telegram chat/user ID |
+| `PROXY_DOWN_GRACE` | `240` | Seconds before sending down alert (4 min) |
 | `PROXY_CHECK_INTERVAL` | `30` | Seconds between SOCKS5 health checks |
-| `SOCKS5_PORTS` | `1080,1081` | Ports to monitor (matches DONGLE_HOSTS order) |
-
----
-
-## Multi-Dongle Setup
-
-Each XH22 dongle appears as a separate ethernet interface with its own subnet:
-
-| Dongle | Interface | Subnet | Panel IP |
-|--------|-----------|--------|----------|
-| XH22 #1 | eth1 | 192.168.101.x | 192.168.101.1 |
-| XH22 #2 | eth2 | 192.168.102.x | 192.168.102.1 |
-| XH22 #3 | eth3 | 192.168.103.x | 192.168.103.1 |
-
-The dashboard auto-detects all connected dongles. Each gets its own "Rotate IP" button.
-The `/api/rotate/<index>` endpoint rotates by dongle index (0-based).
+| `SOCKS5_PORTS` | `1080,1081` | Ports to monitor |
 
 ---
 
@@ -559,25 +635,63 @@ The `/api/rotate/<index>` endpoint rotates by dongle index (0-based).
 
 | Problem | Cause | Fix |
 |---------|-------|-----|
+| System crashes every 5–15 min | Bots flooding open SOCKS5 ports → CLOSE-WAIT fills RAM | Apply iptables whitelist (v2.2.0) |
+| CLOSE-WAIT count growing fast | danted accumulating stale sockets | Add `child.maxrequests: 200` + `timeout.io: 3600` |
+| RAM at 2.9 GB / OOM kill | CLOSE-WAIT from bots exhausting 3 GB RAM | Whitelist firewall — blocks bots before they reach danted |
+| Proxy down from outside (not LAN) | Your home IP changed, whitelist not updated | Wait 1 min (cron updates automatically via DuckDNS) |
 | `UNAUTHORIZED` from dongle API | Auth nc counter out of sync | `hilink.reset_client()` or restart xproxymgr |
 | IP doesn't change after rotate | Wrong endpoint | Must use `file=router`, not `file=renew` or disconnect |
-| SOCKS5 shows "Stopped" | `is_running()` checks danted via systemctl | `systemctl status danted` |
-| Dashboard shows `unknown` | Monitor thread hasn't run yet | Wait 15s after restart |
+| SOCKS5 shows "Stopped" | danted not running | `systemctl status danted-dongle0` + `systemctl restart danted-dongle0` |
+| Dashboard shows only 1 dongle | DONGLE_HOSTS has wrong IP (old 192.168.101.1) | Update config.py: `DONGLE_HOSTS="192.168.103.1,192.168.102.1"` |
+| HTTPS fails through True proxy | MTU too large (True carrier needs 1280) | `ip link set dev ethX mtu 1280` (handled by routing script) |
 | Dongle not detected | Interface not up | `ip addr show` — check ethX exists |
 | SSH: `Permission denied` | Key not in authorized_keys | Re-run key injection via backup/restore |
-| fail2ban blocking SSH | Too many failed attempts | Wait 10min or `fail2ban-client unban <ip>` |
-| SOCKS5 connection times out externally | Policy routing missing | `ip rule add from 192.168.101.100 table 101` + `ip route add default via 192.168.101.1 dev eth1 table 101` |
-| danted fails to start | Log file read-only at boot | Use `logoutput: syslog` in danted.conf, not a file path |
-| Can't reach proxy via DuckDNS from home LAN | Port forwarding rule missing in router | Check rules in router: Internet → Security → Port Forwarding |
-| xproxymgr crash: `AttributeError: module 'config' has no attribute 'DONGLE_HOSTS'` | Old config.py on device | Deploy ALL Python files together: `scp app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/` |
+| fail2ban blocking SSH | Too many failed attempts | `fail2ban-client unban <ip>` (ignoreip includes 192.168.1.0/24) |
+| SOCKS5 times out externally | Policy routing missing | Run `/etc/networkd-dispatcher/routable.d/50-eth1-policy-routing` manually |
+| danted fails to start: "Address already in use" | Previous instance still holding port | `fuser -k 1080/tcp && systemctl restart danted-dongle0` |
+| DuckDNS updating with dongle IP | Dongle DHCP overrode default route | Check `/etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults` is in place |
+| Proxy checks always failing | PySocks not installed | `pip3 install "requests[socks]"` |
+| xproxymgr crash: `AttributeError: module 'config'` | Old config.py on device | Deploy ALL Python files: `scp app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/` |
 
 ---
 
-## Security Notes
+## Multi-Dongle Setup
 
-- XProxy XB22 ships with an **undocumented root SSH backdoor** (XProxy staff access)
-- The XProxy web panel has **no authentication by default** — `/v2/system_backup` and `/v2/system_restore` are unauthenticated and allow full system compromise on a stock device
-- **After taking control:** disable XProxy, set key-only SSH, firewall ports 22 and 8080
+| Dongle | Carrier | Subnet | Panel IP | SOCKS5 port | rt_tables |
+|--------|---------|--------|----------|-------------|-----------|
+| XH22 #1 | True | 192.168.103.x | 192.168.103.1 | 1080 | 103 |
+| XH22 #2 | DTAC | 192.168.102.x | 192.168.102.1 | 1081 | 102 |
+
+> Interface names (eth1, eth2) can swap on reboot/replug — routing script and danted both use IP-based detection.
+
+---
+
+## Moving the Setup to a Different Network
+
+### Checklist
+
+```
+□ DHCP binding in new router: MAC 02:03:76:f0:1b:bb → fixed IP
+□ Port forwarding: 1080, 1081, 8080 → XB22 LAN IP
+□ DuckDNS auto-updated to new public IP (cron runs every 5 min on XB22)
+□ Whitelist auto-updated to new public IP (cron runs every 1 min on XB22)
+□ Test: curl http://havanawin.duckdns.org:8080/api/status
+□ Test: curl --socks5 192.168.1.107:1080 https://api.ipify.org  (from LAN)
+```
+
+> DuckDNS tracks your **router's public IP** — NOT the dongle IPs (dongle IPs change on rotate).
+> Everything on XB22 itself works unchanged — only router rules and the whitelist IP change.
+
+---
+
+## Second XProxy XB22 Box — Attempt Log
+
+A second XProxy XB22 (MAC: `02:03:1d:4a:a1:61`) runs **XProxy V20.4** (expired free license).
+
+- `GET /v2/system_backup` → **404** (locked behind expired license — exploit does NOT work on V20.4)
+- All config POST endpoints → `{"status":false}` (license check blocks everything)
+- ~40 common passwords via sshpass → all failed
+- **On hold** — requires USB→UART serial adapter (~30 zł) to interrupt U-Boot and reset password
 
 ---
 
@@ -587,507 +701,72 @@ Paste this into a new Claude Code session to resume work instantly:
 
 ```
 I have a self-hosted 4G proxy manager running on XProxy XB22 (ARM64, Ubuntu 20.04).
-Code: ~/Desktop/xproxy/ | Deployed: root@192.168.1.107:/opt/xproxymgr/
+GitHub: https://github.com/martinhavana/xproxymgr
+SSH: ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
 
 HARDWARE:
-- XB22: ARM64 Ubuntu 20.04, IP 192.168.1.107, SSH → ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
-- XH22 dongle #1: eth1 (192.168.101.100/24), panel at http://192.168.101.1
-- XH22 dongle #2: eth2 (192.168.102.100/24), panel at http://192.168.102.1
+- XB22: ARM64 Ubuntu 20.04, IP 192.168.1.107 (MAC 02:03:76:f0:1b:bb), eth0 = LAN
+- XH22 dongle 0 (True):  subnet 192.168.103.x, panel 192.168.103.1, SOCKS5 port 1080
+- XH22 dongle 1 (DTAC):  subnet 192.168.102.x, panel 192.168.102.1, SOCKS5 port 1081
+- Interface names (eth1/eth2) can SWAP on reboot — all scripts use IP-based detection
 
-SERVICES RUNNING:
-- xproxymgr (Flask): port 8080 — web dashboard + REST API
-- danted-dongle0 (SOCKS5): port 1080 — dongle 0 (True), no auth
-- danted-dongle1 (SOCKS5): port 1081 — dongle 1 (DTAC), no auth
-- Deploy command: scp -i ~/.ssh/id_ed25519 app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/ && ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "systemctl restart xproxymgr"
-- ALWAYS deploy ALL .py files together (config.py must stay in sync with app.py)
-
-DONGLES:
-- Dongle 0 (True):  panel 192.168.101.1, subnet 192.168.101.x, SOCKS5 port 1080
-- Dongle 1 (DTAC):  panel 192.168.102.1, subnet 192.168.102.x, SOCKS5 port 1081
-- ⚠️ Interface names (eth1/eth2) can SWAP on reboot — routing script uses IP-based detection
+SERVICES:
+- xproxymgr (Flask):     port 8080 — web dashboard + REST API
+- danted-dongle0 (SOCKS5): port 1080 — True (192.168.103.100)
+- danted-dongle1 (SOCKS5): port 1081 — DTAC (192.168.102.100)
+- Deploy: scp -i ~/.ssh/id_ed25519 app.py config.py hilink.py proxy_manager.py root@192.168.1.107:/opt/xproxymgr/ && ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "systemctl restart xproxymgr"
+- ALWAYS deploy ALL .py files together (config.py must stay in sync)
 
 EXTERNAL ACCESS:
-- DuckDNS domain: havanawin.duckdns.org → 58.136.146.0 (AIS Fibre public IP)
-- Router: AIS Fibre F6107A — login at http://192.168.1.1
-- SOCKS5 dongle 0 (True): havanawin.duckdns.org:1080
-- SOCKS5 dongle 1 (DTAC): havanawin.duckdns.org:1081
-- Dashboard (anywhere): http://havanawin.duckdns.org:8080
-- Rotate dongle 0 (AdsPower): http://havanawin.duckdns.org:8080/api/rotate/0
-- Rotate dongle 1 (AdsPower): http://havanawin.duckdns.org:8080/api/rotate/1
-- AIS F6107A supports hairpin NAT — havanawin.duckdns.org works from home WiFi too
+- DuckDNS: havanawin.duckdns.org → 58.136.146.0 (AIS Fibre, auto-updated every 5 min)
+- Router: AIS Fibre F6107A (http://192.168.1.1), supports hairpin NAT
+- SOCKS5 True: havanawin.duckdns.org:1080
+- SOCKS5 DTAC: havanawin.duckdns.org:1081
+- Dashboard: http://havanawin.duckdns.org:8080
+- Rotate True: http://havanawin.duckdns.org:8080/api/rotate/0
+- Rotate DTAC: http://havanawin.duckdns.org:8080/api/rotate/1
 
-ROUTER PORT FORWARDING (Internet → Security → Port Forwarding):
-- SOCKS5:        ext 1080 → 192.168.1.107:1080  TCP  [Dongle 0 True]
-- DTAC-SOCKS5:   ext 1081 → 192.168.1.107:1081  TCP  [Dongle 1 DTAC]
-- ProxyAPI:      ext 8080 → 192.168.1.107:8080  TCP  [XB22 dashboard/API]
-- HTTP-Proxy:    ext 4201 → 192.168.1.151:4201  TCP  [Mac Mini backup — DO NOT DELETE]
-- Android-SOCKS5:ext 5301 → 192.168.1.151:5301  TCP  [Mac Mini backup — DO NOT DELETE]
-- XProxyMgr:     ext 5050 → 192.168.1.151:5050  TCP  [Mac Mini backup — DO NOT DELETE]
+FIREWALL (v2.2.0 — CRITICAL):
+- Ports 1080/1081 whitelisted: 127.0.0.1, 192.168.1.0/24, home public IP only
+- All other IPs → DROP (prevents bot floods that cause CLOSE-WAIT RAM exhaustion + crashes)
+- Whitelist auto-updates every 1 min via /usr/local/bin/update-proxy-whitelist.sh (cron)
+- Rules saved: /etc/iptables/rules.v4
+- IF PROXY UNREACHABLE FROM NEW LOCATION: run update-proxy-whitelist.sh with new IP manually
 
-DHCP BINDING (Local Network → IPv4 → DHCP Binding):
-- XProxy XB22: MAC 02:03:76:f0:1b:bb → fixed IP 192.168.1.107
+ROOT CAUSE OF PAST CRASHES (v2.1.0 / v2.2.0):
+- SOCKS5 was open to internet → bots flooded connections → CLOSE-WAIT accumulated → 3GB RAM exhausted → OOM kill
+- Fix: iptables whitelist (bots never reach danted) + child.maxrequests: 200 + timeout.io: 3600
 
-POLICY ROUTING (critical — without this SOCKS5 times out):
-- Script: /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
-- IP-based: 192.168.101.100 → table 101, 192.168.102.100 → table 102
-- Works regardless of which ethX each dongle gets assigned
+DANTED CONFIG (key options):
+- timeout.connect: 30 / timeout.io: 3600 / child.maxrequests: 200
+- external: 192.168.103.100 (True) / 192.168.102.100 (DTAC) — IP not interface name
+- logoutput: syslog (NOT file path) / socksmethod: none (NOT "username none")
+- systemd Type=simple with ExecStart=/usr/sbin/danted -N 1 -f ...
 
-CRITICAL TECHNICAL FACTS — XH22 DONGLE API:
-1. NOT Huawei HiLink — custom Qualcomm firmware (Mongoose 3.0)
-2. Digest auth quirk: uri in Authorization header ALWAYS = "/cgi/xml_action.cgi" (hardcoded, not actual path)
-3. Login: GET /login.cgi (get challenge) → GET /login.cgi + Authorization (nc=1) → API calls (nc=2+)
-4. API base: GET/POST /xml_action.cgi?method=get|set&module=duster&file=<name>
-5. IP ROTATION: GET file=router → <RGW><nwrestart/> → NEW IP EVERY TIME (~5s) ✅
-   - file=renew = reboot only, IP may NOT change
-   - file=disconnect, DHCP release, ip link down/up = IP does NOT change
-   - ONLY file=router reliably changes IP (forces carrier to release lease)
-6. Dongle credentials: admin/admin
+ROUTING (critical — without this SOCKS5 times out):
+- Policy routing: 192.168.103.100 → table 103, 192.168.102.100 → table 102
+- Script: /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing (IP-based)
+- DHCP hook: /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults
+- MTU 1280 on True dongle interface (HTTPS fails otherwise)
+- Dongle default route MUST NOT appear in main routing table
 
-DANTED (two instances, IP-based binding — survives eth1/eth2 swap):
-- /etc/danted-dongle0.conf: internal port 1080, external 192.168.101.100
-- /etc/danted-dongle1.conf: internal port 1081, external 192.168.102.100
-- systemd: danted-dongle0.service + danted-dongle1.service (Type=simple + wrapper script)
-- Wrapper /usr/local/bin/danted-wrapper keeps foreground alive (danted daemonizes otherwise → PIDFile timeout)
-- logoutput: syslog  (NOT a file path — read-only filesystem at boot causes crash)
-- socksmethod: none  (NOT "username none" — that breaks auth-free setup)
+XH22 API (NOT Huawei HiLink — custom Qualcomm Mongoose 3.0):
+- Digest auth quirk: uri in Authorization ALWAYS = "/cgi/xml_action.cgi"
+- IP ROTATION: GET /xml_action.cgi?method=get&module=duster&file=router → NEW IP ✅
+- file=renew = reboot only, may NOT change IP. Only file=router works reliably.
+- Credentials: admin/admin
 
-CODE STRUCTURE:
-- hilink.py: XH22Client class — _login(), _auth(), _api_get(), rotate_ip() uses file=router
-- proxy_manager.py: danted via systemctl (NOT 3proxy — not in Ubuntu 20.04 apt)
-- app.py: Flask — /api/status /api/rotate /api/rotate/<idx> /api/dongles /api/proxy/start /api/proxy/stop /api/logs
-  - /api/rotate and /api/rotate/<idx> support BOTH GET and POST (GET for AdsPower/browser)
-- config.py: DONGLE_HOSTS="192.168.101.1,192.168.102.1,..." — env-var overrides for all settings
+TELEGRAM ALERTS:
+- Watchdog: every 30s via api4.ipify.org through SOCKS5
+- Down > 4 min → TG 🔴 | Recovery → TG ✅
+- State: /var/lib/xproxymgr/alert_state.json (persists across restarts)
+- Reset: echo '{"alerted":[],"down_since":{}}' > /var/lib/xproxymgr/alert_state.json
 
-HOW WE GAINED ROOT (for reference):
-- Unauthenticated GET /v2/system_backup → 62MB ZIP download
-- Modified etc/system_crontab.cron to inject SSH pubkey
-- POST /v2/system_restore with modified ZIP → cron ran → SSH access
-
-ROUTING FIX (2026-03-18): networkd-dispatcher was unreliable for USB ethernet → added xproxy-routing.service
-- If SOCKS5 times out after reboot: SSH in, run /etc/networkd-dispatcher/routable.d/50-eth1-policy-routing manually
-
-DUCKDNS AUTO-UPDATE (2026-03-19): Cron running on XB22 every 5 minutes
-- Updates havanawin.duckdns.org automatically on any network — nothing manual needed
-- Verify: ssh root@192.168.1.107 "cat /tmp/duckdns.log"  → should output: OK
-- DuckDNS tracks ROUTER's public IP (ISP), NOT dongle IPs — dongle rotation is separate
-
-SECOND BOX: XProxy XB22 v2 (MAC 02:03:1d:4a:a1:61) — runs XProxy V20.4 (expired license)
-- backup/restore exploit DOES NOT work on V20.4
-- HDMI + USB keyboard tried: login prompt visible, password unknown, no GRUB (uses U-Boot/Armbian)
-- U-Boot does NOT output to HDMI → can't interrupt boot from keyboard
-- Remaining options: USB→UART serial adapter (~30 zł) OR Allwinner FEL mode via USB-C cable
-- On hold
-
-TELEGRAM ALERTS (v1.9.0):
-- Watchdog checks SOCKS5 :1080 (True) + :1081 (DTAC) every 30s via api4.ipify.org
-- Down > 2 min → TG alert 🔴 | Recovery → TG alert ✅
-- State persisted to /var/lib/xproxymgr/alert_state.json (survives restarts)
-- Requires: pip3 install "requests[socks]" (PySocks — without it all checks fail silently)
-- Reset state if needed: echo '{"alerted":[],"down_since":{}}' > /var/lib/xproxymgr/alert_state.json
-
-ROUTING — NAJCZĘSTSZA PRZYCZYNA AWARII:
-1. Dongle DHCP nadpisuje default route → cały ruch XB22 przez dongle zamiast eth0
-   Diagnoza: ip route show default → nie może być linii z 192.168.101.1 lub 192.168.102.1
-   Naprawa: ip route del default via 192.168.10x.1 dev ethX [metric Y]
-   Trwałe: /etc/dhcp/dhclient-exit-hooks.d/remove-dongle-defaults (już zainstalowane)
-2. Policy routing puste po rebootcie → xproxy-routing.service (już zainstalowane)
-3. danted "Address already in use" → fuser -k 1080/tcp; systemctl restart danted-dongle0
-
-CURRENT STATUS: All working as of 2026-03-25 (v2.1.0).
-- True dongle: NOWA podsieć 192.168.103.x (stara 192.168.101.x nieużywana)
-- DTAC dongle: 192.168.102.x (bez zmian)
-- SOCKS5 dongle 0 (True):  havanawin.duckdns.org:1080
-- SOCKS5 dongle 1 (DTAC):  havanawin.duckdns.org:1081
-- Dashboard: http://havanawin.duckdns.org:8080 (per-dongle cards, auto-updates)
-- Rotate dongle 0: curl http://havanawin.duckdns.org:8080/api/rotate/0
-- Rotate dongle 1: curl http://havanawin.duckdns.org:8080/api/rotate/1
-- DuckDNS: auto-updating every 5 min from XB22 cron
-- Telegram alerts: active, state in /var/lib/xproxymgr/alert_state.json
-- GitHub: https://github.com/martinhavana/xproxymgr
+CURRENT STATUS (v2.2.0, 2026-03-27):
+- Both proxies working: True 49.237.44.165, DTAC 1.46.2.35
+- RAM stable: ~780 MB used (was crashing at 2940 MB)
+- CLOSE-WAIT: ~60 (was 4000+)
+- Uptime: stable since whitelist applied
 
 I want to [DESCRIBE WHAT YOU WANT TO DO NEXT]
 ```
-
----
-
-## Moving the Setup to a Different Network
-
-If you take the XB22 to a new location (different router, different ISP), here's what needs to change:
-
-### 1. DHCP Binding — New Router
-
-In the new router's admin panel, bind the XB22's MAC to a fixed LAN IP:
-
-| Device | MAC | Fixed IP |
-|--------|-----|----------|
-| XProxy XB22 | `02:03:76:f0:1b:bb` | `192.168.1.107` (or any IP you choose) |
-
-> If the new router uses a different subnet (e.g. `10.0.0.x`), pick an IP on that subnet and update all port forwarding rules accordingly.
-
-### 2. Port Forwarding — New Router
-
-Forward these ports to the XB22's LAN IP:
-
-| External Port | Internal IP | Internal Port | Protocol | Purpose |
-|--------------|-------------|---------------|----------|---------|
-| **1080** | 192.168.1.107 | 1080 | TCP | SOCKS5 dongle 0 (True) |
-| **1081** | 192.168.1.107 | 1081 | TCP | SOCKS5 dongle 1 (DTAC) |
-| **8080** | 192.168.1.107 | 8080 | TCP | Dashboard + API |
-
-### 3. DuckDNS — Update Public IP
-
-**Auto-update is already configured on XB22** (cron every 5 minutes — set up 2026-03-19).
-XB22 automatically detects the new public IP and updates DuckDNS. Nothing to do manually.
-
-To verify it's working after moving:
-```bash
-ssh -i ~/.ssh/id_ed25519 root@192.168.1.107 "cat /tmp/duckdns.log"
-# Should output: OK
-```
-
-If you ever need to set it up again on a fresh box (replace TOKEN with your DuckDNS token):
-```bash
-(crontab -l 2>/dev/null; echo "*/5 * * * * curl -s 'https://www.duckdns.org/update?domains=havanawin&token=TOKEN&ip=' -o /tmp/duckdns.log") | crontab -
-```
-
-> DuckDNS tracks your **router's public IP** (assigned by ISP) — NOT the dongle IPs.
-> Dongle rotation (True/DTAC IPs) is completely separate and has nothing to do with DuckDNS.
-
-### 4. Nothing Changes on XB22 Itself
-
-- Policy routing uses IP-based detection (192.168.101.x / 192.168.102.x dongle subnets) — works on any LAN
-- danted binds to dongle subnet IPs — not affected by LAN subnet change
-- xproxymgr service listens on `0.0.0.0:8080` — works on any network
-- SSH key stays in `/root/.ssh/authorized_keys`
-
-### 5. Checklist
-
-```
-□ DHCP binding in new router: MAC 02:03:76:f0:1b:bb → fixed IP
-□ Port forwarding: 1080, 1081, 8080 → XB22 LAN IP
-□ DuckDNS updated to new public IP (or auto-updater running on XB22)
-□ Test: curl http://havanawin.duckdns.org:8080/api/status
-□ Test: curl --socks5 havanawin.duckdns.org:1080 http://ifconfig.me
-□ Test: curl --socks5 havanawin.duckdns.org:1081 http://ifconfig.me
-```
-
-> If the new router's LAN subnet is different (not 192.168.1.x), the XB22's own LAN IP will change.
-> SSH into it via the new IP, then verify DHCP binding is applied.
-> Everything on XB22 itself still works — only the external address and router rules change.
-
----
-
-## Second XProxy XB22 Box — Attempt Log
-
-A second XProxy XB22 (MAC: `02:03:1d:4a:a1:61`, IP: `192.168.1.191` via DHCP) was tested.
-It runs **XProxy V20.4** (build 2023.Oct04.1938, expired free license).
-
-### What Works on Second Box
-- Panel accessible at `http://192.168.1.191` (no auth required)
-- SSH port 22 open
-- Device boots, responds to ping
-
-### What Was Blocked / Locked
-- `GET /v2/system_backup` → **404** (locked behind expired license — exploit used on first box does NOT work on V20.4)
-- All config POST endpoints (system_time_zone, update_proxies_settings, etc.) → `{"status":false}` (license check)
-- `sshpass` with ~40 common passwords → all failed
-- Path traversal via `/v2/vpn_service_upload` → **blocked** (werkzeug `secure_filename` sanitizes filename)
-
-### How to Gain Access to Second Box
-
-**Everything tried so far (2026-03-19):**
-
-| Method | Result |
-|--------|--------|
-| `/v2/system_backup` exploit | ❌ 404 — locked behind expired license |
-| SSH + ~40 common passwords | ❌ All failed |
-| Path traversal via `/v2/vpn_service_upload` | ❌ Blocked by werkzeug `secure_filename` |
-| HDMI + USB keyboard — login prompt | ✅ Visible — but password unknown, hit lockout after 5 tries |
-| GRUB recovery mode (Shift/Esc at boot) | ❌ No GRUB — device uses **U-Boot** (Allwinner H6 / Armbian) |
-| U-Boot interrupt from HDMI | ❌ U-Boot outputs to serial only — HDMI shows nothing until kernel boots |
-
-**Why HDMI + keyboard doesn't fully work:**
-This device (Tanix TX6 / Allwinner H6 / Armbian) does NOT use GRUB.
-It uses U-Boot → extlinux. U-Boot outputs to serial console (UART), not HDMI.
-You can see the Linux kernel boot (systemd messages) on HDMI, but you can't interrupt U-Boot from there.
-
-**Remaining options:**
-
-**Option A — USB→UART serial adapter** (~25–40 zł on Shopee/Aliexpress) ⭐ easiest
-Connect to UART pins on the PCB, get full U-Boot terminal, add `init=/bin/bash` to boot args, change root password.
-
-**Option B — Allwinner FEL mode via USB**
-1. Get USB-C → USB-A cable (Mac to box)
-2. `brew install sunxi-tools`
-3. Hold reset button inside AV port (toothpick), power on → box enters FEL mode
-4. Use `sunxi-fel` to dump eMMC, modify `/etc/shadow`, write back
-> Caution: full eMMC dump/write is 29GB over USB — takes 1–2 hours, some brick risk
-
-> Second box remains **on hold** pending serial adapter or FEL mode attempt.
-> Add DHCP binding in router before deploying: MAC `02:03:1d:4a:a1:61` → fixed IP (e.g. `192.168.1.108`)
-
----
-
-## Routing Issues — Complete Guide
-
-Routing jest **najczęstszą przyczyną awarii** tego systemu. Są dwa osobne problemy:
-
----
-
-### Problem 1 — Dongle DHCP nadpisuje default route ⚠️ NAJWAŻNIEJSZY
-
-**Objawy:**
-- Proxy działa lokalnie (`192.168.1.107:1080`) ale nie przez DuckDNS
-- `curl https://api4.ipify.org` z XB22 zwraca IP dongla (np. `1.47.x.x`) zamiast IP routera
-- DuckDNS aktualizuje się błędnym IP (dongla zamiast routera AIS)
-- AdsPower nie może się połączyć mimo że dashboard działa
-
-**Diagnoza:**
-```bash
-ssh root@192.168.1.107
-ip route show default
-# ŹLE: widać linie z via 192.168.101.1 lub 192.168.102.1 z metric < 202
-# DOBRZE: jedyna linia to: default via 192.168.1.1 dev eth0 ... metric 202
-
-curl https://api4.ipify.org
-# Powinno zwrócić IP routera AIS (np. 58.136.146.0)
-# Jeśli zwraca 1.47.x.x lub 49.237.x.x — routing jest popsuty
-```
-
-**Dlaczego się to dzieje:**
-Dongle XH22 podłączone przez USB działają jak interfejsy ethernet z własnym DHCP.
-Ten DHCP dodaje default route z niskim metric (101, 102) — niższym niż eth0 (202).
-Linux wybiera trasę o najniższym metric → cały ruch XB22 idzie przez dongle zamiast przez router domowy.
-
-**Trwałe naprawienie — cron co minutę (już zainstalowany):**
-```bash
-# Weryfikacja że cron działa:
-crontab -l | grep fix-routes
-# Powinno zwrócić: * * * * * /usr/local/bin/fix-routes
-```
-
-Instalacja od zera (np. po reinstalacji):
-```bash
-cp fix-routes /usr/local/bin/fix-routes
-chmod +x /usr/local/bin/fix-routes
-(crontab -l; echo '* * * * * /usr/local/bin/fix-routes') | crontab -
-```
-
-> **Uwaga:** `dhclient-exit-hooks` NIE jest niezawodne — hook nie odpala się przy wszystkich sytuacjach (boot z cached lease, replug, itp.). **Cron co minutę jest jedynym pewnym rozwiązaniem.**
-
-**Ręczna naprawa gdy już się posypało:**
-```bash
-ssh root@192.168.1.107
-# Usuń wszystkie dongle default routes
-ip route del default via 192.168.102.1 dev eth1 2>/dev/null; true
-ip route del default via 192.168.101.1 dev eth2 2>/dev/null; true
-ip route del default via 192.168.102.1 dev eth1 metric 203 2>/dev/null; true
-ip route del default via 192.168.101.1 dev eth2 metric 204 2>/dev/null; true
-# Weryfikacja — powinna zostać tylko jedna linia z eth0
-ip route show default
-# Test — musi zwrócić IP routera AIS, nie dongla
-curl https://api4.ipify.org
-```
-
-**DuckDNS cron — zabezpieczony przez `--interface eth0`:**
-```bash
-# Cron zawsze wysyła przez eth0 (home network), nigdy przez dongle
-crontab -l | grep duckdns
-# Powinno zawierać: curl -s --interface eth0 "https://www.duckdns.org/..."
-```
-
----
-
-### Problem 2 — Policy routing nie działa po rebootcie
-
-**Objawy:** SOCKS5 przyjmuje połączenia ale ruch przez dongle timeout-uje
-
-**Root cause:** `networkd-dispatcher` nie zawsze odpala się dla USB ethernet przy starcie
-
-**Fix (zainstalowany jako `xproxy-routing.service`):**
-```bash
-cat > /etc/systemd/system/xproxy-routing.service << 'EOF'
-[Unit]
-Description=XProxy dongle policy routing setup
-After=network.target network-online.target
-Wants=network-online.target
-
-[Service]
-Type=oneshot
-RemainAfterExit=yes
-ExecStart=/etc/networkd-dispatcher/routable.d/50-eth1-policy-routing
-Restart=no
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload && systemctl enable --now xproxy-routing.service
-```
-
-**Ręczna naprawa:**
-```bash
-ssh root@192.168.1.107
-ip rule add from 192.168.101.100 table 101 2>/dev/null || true
-ip rule add from 192.168.102.100 table 102 2>/dev/null || true
-ip route replace default via 192.168.101.1 dev eth2 table 101   # adjust ethX
-ip route replace default via 192.168.102.1 dev eth1 table 102   # adjust ethX
-```
-
----
-
-### Problem 3 — danted nie startuje (Address already in use)
-
-**Objawy:** `systemctl status danted-dongle0` → `Failed`, port 1080 zajęty
-
-**Dlaczego:** poprzedni proces danted nie został poprawnie zabity
-
-**Fix (zainstalowany — `ExecStartPre fuser -k` w unit file):**
-```bash
-# Ręczna naprawa:
-fuser -k 1080/tcp 2>/dev/null; fuser -k 1081/tcp 2>/dev/null
-systemctl restart danted-dongle0 danted-dongle1
-```
-
----
-
-### Checklista diagnostyczna — gdy proxy nie działa
-
-```
-1. SSH na XB22:  ssh -i ~/.ssh/id_ed25519 root@192.168.1.107
-
-2. Sprawdź default route:
-   ip route show default
-   → Musi być TYLKO: default via 192.168.1.1 dev eth0 ... metric 202
-   → Jeśli są linie z 192.168.101.1 lub 192.168.102.1 → Problem 1 (usuń je)
-
-3. Sprawdź public IP:
-   curl https://api4.ipify.org
-   → Musi zwrócić IP routera AIS (np. 58.136.146.0)
-   → Jeśli zwraca 1.47.x.x lub 49.237.x.x → Problem 1
-
-4. Sprawdź czy danted działa:
-   systemctl is-active danted-dongle0 danted-dongle1
-   ss -tlnp | grep -E '1080|1081'
-   → Oba muszą być active i nasłuchiwać
-
-5. Test lokalny SOCKS5:
-   python3 -c "import requests; print(requests.get('https://api4.ipify.org', timeout=10, proxies={'https':'socks5h://127.0.0.1:1080'}).text)"
-   → Musi zwrócić IP True dongla
-
-6. Test zewnętrzny:
-   curl --proxy socks5h://havanawin.duckdns.org:1080 https://api4.ipify.org
-   → Musi zwrócić IP True dongla
-   → Jeśli lokalny (krok 5) działa a zewnętrzny nie → Problem z DuckDNS lub port forwarding
-```
-
----
-
-## Version History
-
-### v2.1.0 — True dongle overheating fix + new subnet + CLOSE-WAIT auto-restart
-
-- **Root cause found:** True dongle (XH22) overheating → USB resets → proxy "down" every 4-17 min. Fix: replace dongle + change USB port + ensure ventilation
-- **New dongle subnet:** True dongle now on `192.168.103.x` (was `192.168.101.x`) — updated danted config, routing tables, dhclient hook, routing script
-- **Fixed CLOSE-WAIT socket leak:** 4000+ CLOSE-WAIT connections on port 1080 caused danted to crash under load. Added `danted-health.sh` cron (every 5 min) — auto-restarts danted-dongle0 when CLOSE-WAIT > 2000
-- **Hardened routing script:** `50-eth1-policy-routing` now also removes dongle default routes from main table as failsafe — covers subnets 101/102/103. Runs `while ip route del` loop to catch multiple entries
-- **TCP tuning via sysctl:** `tcp_fin_timeout=15`, `tcp_tw_reuse=1`, keepalive 60/10/3 — sockets clear faster, reduces CLOSE-WAIT buildup
-- **fail2ban whitelist:** `192.168.1.0/24` added to `ignoreip` in `jail.local` — SSH diagnostics can never lock out LAN again
-- **Added monitoring cron:** `monitor-true.sh` logs True interface state every minute to `/var/log/true-monitor.log`
-
-### v2.0.0 — Routing fixes permanent + danted reliability
-
-- **Fixed** dongle DHCP overriding default route: added `dhclient-exit-hooks.d/remove-dongle-defaults` — automatically removes default routes added by dongle DHCP on every renewal. Root cause of most "proxy not working" incidents
-- **Fixed** DuckDNS cron: added `--interface eth0` — always sends router's public IP, never dongle IP
-- **Fixed** danted systemd: switched from `Type=forking` + PID file to `Type=simple` + `-N 1` (no-fork) + `ExecStartPre fuser -k` — eliminates "Address already in use" restart loops
-- **Added** `remove-dongle-defaults` hook file to repo
-- **Added** complete routing troubleshooting guide to README with 3 problems, symptoms, causes and checklists
-
-### v1.9.0 — Telegram proxy alerts + persistent alert state
-
-- **Added** Telegram watchdog — monitors SOCKS5 `:1080` (True) and `:1081` (DTAC) every 30s via real HTTP request through each proxy
-- **Alert:** after 2 min downtime → `🔴 Dongle-X — proxy nie działa!`
-- **Recovery:** when proxy comes back → `✅ Dongle-X — proxy wróciło! IP: x.x.x.x, Czas awarii: X min`
-- **Persistent state:** alert state saved to `/var/lib/xproxymgr/alert_state.json` — survives service restarts, recovery messages always correct
-- **Fixed Python 3.8 compatibility:** `str | None` → `Optional[str]` (Ubuntu 20.04 ships Python 3.8)
-- **Fixed PySocks dependency:** `pip3 install "requests[socks]"` required for SOCKS5 checks — without it all checks fail silently with `Missing dependencies for SOCKS support`
-- **Config:** new env vars `TG_TOKEN`, `TG_CHAT_ID`, `PROXY_DOWN_GRACE`, `PROXY_CHECK_INTERVAL`, `SOCKS5_PORTS`
-
-### v1.8.0 — DuckDNS auto-update + second box deep investigation
-
-- **Added** DuckDNS auto-update cron on XB22 (every 5 min) — `havanawin.duckdns.org` self-updates on any network, no manual intervention needed
-- **Investigated** second box further: HDMI + USB keyboard connected, login prompt visible, password not found (~40 attempts tried). GRUB recovery impossible — device uses U-Boot (Allwinner H6/Armbian), which does NOT output to HDMI
-- **Documented** remaining options for second box: USB→UART serial adapter or Allwinner FEL mode
-- **Updated** "Moving to a New Network" guide with DuckDNS auto-update status and clarification that DuckDNS tracks router WAN IP (not dongle IPs)
-
-### v1.7.0 — Routing persistence fix + second box investigation
-
-- **Fixed** policy routing not surviving reboot: added `xproxy-routing.service` systemd unit that runs the routing script reliably at boot (networkd-dispatcher alone was unreliable for USB ethernet interfaces)
-- **Investigated** second XProxy XB22 (V20.4) — documented what works and what doesn't
-- **Updated** troubleshooting guide with routing recovery procedure
-
-### v1.6.0 — Dashboard redesign: per-dongle cards
-
-- **Removed** single WAN IP card, single signal bar, SOCKS5 Start/Stop buttons
-- **Added** dynamic per-dongle cards — only active (connected or has IP) dongles shown
-- Each card: IP, signal bar, connection status badge, network type, SOCKS5 port info, last rotate result, Rotate button
-- Proxy port auto-calculated per dongle: `1080 + index` (dongle 0 = 1080, dongle 1 = 1081)
-- Dashboard JS rebuilds cards on every poll, updating values in place
-- `hilink.py`: `get_current_ip()` now uses correct subnet bind IP (`192.168.10x.100`) derived from host, instead of hardcoded `eth1`
-
-### v1.5.0 — Second dongle (DTAC) + two danted instances + IP-based routing
-
-- **Added XH22 dongle 1 (DTAC)** — fully working alongside dongle 0 (True)
-- **Two danted instances**: `danted-dongle0.service` (port 1080) and `danted-dongle1.service` (port 1081)
-  - Each bound to subnet IP (not interface name): `external: 192.168.101.100` / `external: 192.168.102.100`
-  - Uses wrapper script to keep foreground process alive for systemd `Type=simple`
-- **IP-based policy routing**: routing script uses `case "$ip"` match instead of `$IFACE` name — survives eth1/eth2 interface swap on reboot/replug
-- **Router port forwarding**: added `DTAC-SOCKS5` rule — ext 1081 → 192.168.1.107:1081
-- **External access**: `havanawin.duckdns.org:1080` (True) + `havanawin.duckdns.org:1081` (DTAC) both working
-- **Config**: `DONGLE_HOSTS` updated to scan 192.168.101.1–105.1 (auto-detect up to 5 dongles)
-
-### v1.4.0 — External access + GET rotate endpoints + routing fix
-
-- **Removed Tailscale** — requires Tailscale on every client device, not suitable for public proxy use
-- **DuckDNS + port forwarding** — `havanawin.duckdns.org:1080` (SOCKS5) and `:8080` (dashboard) accessible from any network
-  - AIS Fibre F6107A router: port forwarding 1080 and 8080 → 192.168.1.107
-  - Fixed router had wrong internal IP (192.168.1.151 → 192.168.1.107) via Chrome CDP
-- **Policy routing fix** — SOCKS5 was timing out because outgoing traffic on eth1 was routed via eth0 (asymmetric routing). Fixed with `ip rule + ip route` per-source routing. Persisted via networkd-dispatcher.
-- **GET endpoints for AdsPower** — `/api/rotate` and `/api/rotate/<index>` now accept both GET and POST
-  - AdsPower rotation URL: `http://havanawin.duckdns.org:8080/api/rotate/0`
-- **danted config fixes** — changed `logoutput` to `syslog` (was file causing boot crash), fixed `socksmethod: none` (was `username none`)
-- **Deploy fix** — must deploy ALL Python files together; old config.py missing `DONGLE_HOSTS` caused crash
-
-### v1.3.0 — Tailscale external access (removed in v1.4.0)
-- Installed Tailscale on XB22 (`tailscale up --reset`)
-- Device registered as `xproxy-xb22` on tailnet `martinhavana.github`
-- Persistent external IP: `100.97.64.109` (accessible from any network)
-- SOCKS5 and dashboard reachable via Tailscale IP from anywhere
-- Fixed `external: eth1` in `/etc/danted.conf` (was wrongly `eth0`)
-
-### v1.2.0 — Dashboard fixes + multi-dongle support
-- Fixed `proxy_manager.is_running()` to check `danted` instead of `3proxy`
-- Fixed `_xml_to_dict()` to flatten nested XML (`<RGW><wan><field>val</field>`)
-- Fixed `api/rotate` response (was calling `.get()` on string)
-- Dashboard correctly shows SOCKS5 Running, IP, 4G connected
-- Added multi-dongle support: auto-detect all XH22 dongles, per-dongle rotate buttons
-- Added `/api/rotate/<index>` endpoint
-
-### v1.1.0 — XH22 dongle API reverse-engineered
-- Identified as Qualcomm Mongoose 3.0 (NOT Huawei HiLink)
-- Reverse-engineered Digest auth quirk (hardcoded uri)
-- Discovered endpoints: wan, router, reset, imei, renew
-- Tested all rotation methods — only `file=router` reliably changes IP
-- IP rotation working: ~5 seconds, new IP every time
-
-### v1.0.0 — Initial root access + stack install
-- Identified unauthenticated `/v2/system_backup` and `/v2/system_restore`
-- Gained root via SSH key injection through crontab in backup ZIP
-- Stopped XProxy, disabled backdoor service
-- Installed dante-server (SOCKS5) + Flask dashboard
-- SOCKS5 confirmed working on port 1080
-
----
-
-*Built with Claude Code — session history available at https://github.com/martinhavana/xproxymgr*
-
-> **Uwaga (2026-03-23):** `supersede routers 0.0.0.0` w dhclient.conf może powodować że policy routing tables (101/102) nie uzupełniają się po DHCP renewal. Dlatego cron co minutę uruchamia BOTH: `fix-routes` i skrypt policy routingu.
